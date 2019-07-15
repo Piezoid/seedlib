@@ -1,0 +1,13 @@
+[submodule "thirparty/sdsl-lite"]
+	path = thirdparty/sdsl-lite
+	url = https://github.com/simongog/sdsl-lite.git
+	shallow = true
+[submodule "thirdparty/clipp"]
+	path = thirdparty/clipp
+	url = https://github.com/muellan/clipp.git
+	shallow = true
+[submodule "thirdparty/gatb-lite"]
+	path = thirdparty/gatb-lite
+	url = https://github.com/Piezoid/gatb-lite.git
+	branch = dev-kw
+	shallow = true
