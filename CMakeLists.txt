@@ -22,10 +22,9 @@ if(NOT SDSL_LIBRARY)
         execute_process(COMMAND git submodule update --init -- ${sdsl_project_dir}
                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 	endif()
-	#ExternalProject_Add(sdsl-lite DIR ${sdsl_project_dir} GIT_SUBMODULES ${sdsl_project_dir} GIT_SHALLOW 1)
     set(CMAKE_POLICY_DEFAULT_CMP0048 NEW)
-	add_subdirectory("${sdsl_project_dir}/")
     FILE(TO_CMAKE_PATH "${sdsl_project_dir}/include" SDSL_INCLUDE_DIR)
+	FILE(TO_CMAKE_PATH "${sdsl_project_dir}/lib" SDSL_LIB_DIR)
 endif()
 
 find_path(GATBL_INCLUDE_DIR "common.hpp" PATHS gatbl gatb-lite ENV GATBL_INCLUDE_DIR)
@@ -51,7 +50,13 @@ endif()
 include_directories(SYSTEM ${CLIPP_INCLUDE_DIR})
 include_directories(SYSTEM ${SDSL_INCLUDE_DIR})
 include_directories(${GATBL_INCLUDE_DIR})
-link_libraries(sdsl)
 
-add_executable(${PROJECT_NAME} "main.cpp" "indexer.cpp")
+set( sdsl_SRCS
+	"${SDSL_LIB_DIR}/bits.cpp"
+	"${SDSL_LIB_DIR}/util.cpp"
+	"${SDSL_LIB_DIR}/ram_fs.cpp"
+	"${SDSL_LIB_DIR}/memory_management.cpp"
+	"${SDSL_LIB_DIR}/rrr_vector_15.cpp"
+)
 
+add_executable(${PROJECT_NAME} "main.cpp" "indexer.cpp" ${sdsl_SRCS})

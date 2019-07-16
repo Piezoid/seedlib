@@ -1,13 +1,17 @@
 #ifndef RRR_MULTIMAP_HPP
 #define RRR_MULTIMAP_HPP
 
+#ifndef NDEBUG
+#    define SDSL_DEBUG 1
+#endif
+
 #include <sdsl/int_vector.hpp>
-#include <sdsl/vlc_vector.hpp>
-#include <sdsl/dac_vector.hpp>
-#include <sdsl/coder_comma.hpp>
-#include <sdsl/coder_elias_delta.hpp>
-#include <sdsl/coder_elias_gamma.hpp>
-#include <sdsl/coder_fibonacci.hpp>
+//#include <sdsl/vlc_vector.hpp>
+//#include <sdsl/dac_vector.hpp>
+//#include <sdsl/coder_comma.hpp>
+//#include <sdsl/coder_elias_delta.hpp>
+//#include <sdsl/coder_elias_gamma.hpp>
+//#include <sdsl/coder_fibonacci.hpp>
 #include <sdsl/rrr_vector.hpp>
 
 #include <gatbl/sys/bits.hpp>
@@ -19,81 +23,89 @@ namespace seedlib {
 /// A multimap from (almost dense) integer keys to sets of integer values
 template<typename K, typename V> struct rrr_multimap
 {
-    using key_t   = K;
-    using value_t = V;
+    using key_t      = K;
+    using value_t    = V;
+    using int_vector = sdsl::int_vector<>;
+    using rrr_vector = sdsl::rrr_vector<>;
+    using size_type  = typename int_vector::size_type;
+    static_assert(gatbl::is_same_v<size_type, typename rrr_vector::size_type>, "size_types differs");
 
     rrr_multimap()               = default;
     rrr_multimap(rrr_multimap&&) = default;
     rrr_multimap& operator=(rrr_multimap&&) = default;
 
+    // Is the map empty (in which case it is illegal to query it)
+    operator bool() const { return _size > 0; }
+
     /// Records must be sorted by key, then value
     template<typename Record, typename ExtrKeyF, typename ExtrValueF, typename OnInsert = const nop_functor&>
     rrr_multimap(std::vector<Record>&& records,
-                 size_t                domain_size,        // Maximal key
-                 size_t                image_size,         // Maximal value
+                 size_type             domain_size,        // Maximal key
+                 size_type             image_size,         // Maximal value
                  ExtrKeyF              extract_key   = {}, // Record -> Key
                  ExtrValueF            extract_value = {}, // Record -> Value
                  OnInsert              on_insert     = {}  // Called with each record and its position in the multimap
     )
     {
-        value_t max_bits
+        size_type max_bits
           = size(records) + domain_size - 1; // Maximal size of the bitvector in the extreme case: all keys are
                                              // the same, the other sets are empty but still taking each one bit
-
+        using tmpdelta_t        = uint32_t;
+        auto             values = gatbl::make_unique<tmpdelta_t[]>(max_bits);
         sdsl::bit_vector tmp_keybs(max_bits, 0);
-        _values = sdsl::int_vector<0>(max_bits, 0, gatbl::bits::ilog2p1(image_size + 1));
 
-        key_t   prev_key   = 0; // Detect transition from one set to the next
-        value_t prev_value = 0; // Delta encoding of values inside each set
-        value_t slot_idx   = 0; // Current slot
+        key_t     prev_key   = 0; // Detect transition from one set to the next
+        value_t   prev_value = 0; // Delta encoding of values inside each set
+        size_type slot_idx   = 0; // Current slot
+        size_type max_delta  = 0; // Maximum delta value
 
         for (auto& rec : records) {
-            auto key   = extract_key(rec);
-            auto value = extract_value(rec);
-
+            auto key = extract_key(rec);
             assert(key >= prev_key, "key are not sorted");
-            if (prev_key < key) {
-                // Handle increase in key and empty sets
+            // Handle increase in key and empty sets
+            if (unlikely(prev_key < key)) {
                 while (true) {
-                    prev_key++;
                     assume(slot_idx < max_bits, "slot_idx out of bounds");
-                    tmp_keybs[slot_idx] = true; // Mark the start of a new set
-                    if (prev_key < key) {
-                        _values[slot_idx] = 0; // special value for empty set
-                        slot_idx++;
+                    tmp_keybs[slot_idx] = true; // Mark the start of a new set (slot_idx point to the next entry)
+                    prev_key++;
+                    if (unlikely(prev_key < key)) {
+                        values[slot_idx++] = 0; // special value for empty set
                     } else {
                         break;
                     }
-                }
+                };
                 prev_value = 0;
             }
-            assume(prev_key == key, "");
 
-            assert(prev_value < value, "values are not sorted: %llu !< %llu", prev_value, value);
+            auto value = extract_value(rec);
+            assume(prev_value < value, "values are not sorted: %llu !< %llu", prev_value, value);
+            value_t delta = value - prev_value;
+            prev_value    = value;
+            if (max_delta < delta) max_delta = delta;
+            assert(delta < std::numeric_limits<tmpdelta_t>::max(), "Delta value larger than supported");
             assume(slot_idx < max_bits, "slot_idx out of bounds");
-            value_t stored_value = value - prev_value;
-            assume(stored_value < (size_t(1) << _values.width()),
-                   "Value larger than supported by bit vector %lu < 2^%lu",
-                   stored_value,
-                   _values.width());
-            if (max_delta < stored_value) max_delta = stored_value;
-            _values[slot_idx] = stored_value; // Delta encoded and shifted for avoiding the special 0 value
-            assert(_values[slot_idx] == stored_value,
-                   "bad int_vector value: %ld, expected: %ls",
-                   _values[slot_idx],
-                   stored_value);
+            values[slot_idx++] = delta; // Delta encoded and shifted for avoiding the special 0 value
 
-            prev_value = value;
-            on_insert(rec, ++slot_idx); // Public idx are shifted by one to be >= 1
+            on_insert(rec, slot_idx); // Public idx are shifted by one to be >= 1
         }
         _size = slot_idx;
 
 #ifdef NDEBUG
         records.clear();
 #endif
-        _values.resize(_size);
         tmp_keybs.resize(_size);
         _key_bs = {std::move(tmp_keybs)};
+
+        _values.width(gatbl::bits::ilog2p1(max_delta));
+        _values.resize(_size);
+        const tmpdelta_t* src = values.get();
+        auto              dst = _values.begin();
+        for (size_type i = _size; i-- > 0; ++src, ++dst) {
+            assert(*src < 1ul << _values.width(), "value out of range");
+            *dst = *src;
+        }
+        assert(dst == _values.end(), "iterator not ended");
+        values.reset();
 
 #ifndef NDEBUG
         for (auto& rec : records) {
@@ -122,11 +134,6 @@ template<typename K, typename V> struct rrr_multimap
         report[prefix + "::bitvector"] += size_in_bytes(_key_bs);
         report[prefix + "::integers"] += size_in_bytes(_values);
 
-        //        size_t max_v = size_t(1) << bits::ilog2p1(max_delta);
-        //        for (auto x : values_)
-        //            assume(x < max_v, "wut? %lu !< 2^%lu", x, bits::ilog2p1(max_delta));
-
-        //        report[prefix + "::integers_comp"] += (bits::ilog2p1(max_delta) * _size()) / 8;
         //        report[prefix + "::integers_ed"] +=
         //        size_in_bytes(sdsl::vlc_vector<sdsl::coder::elias_delta>(values_)); report[prefix +
         //        "::integers_dacdp"] += size_in_bytes(sdsl::dac_vector_dp<>(values_)); report[prefix + "::integers_eg"]
@@ -139,52 +146,38 @@ template<typename K, typename V> struct rrr_multimap
         //        "::integers_c5"] += size_in_bytes(sdsl::vlc_vector<sdsl::coder::comma<5>>(values_));
     }
 
-    using val_it = sdsl::int_vector<>::const_iterator;
-
     template<typename F> hot_fun void iterate_set(key_t key, F&& f) const
     {
-        assert(*this, "query on empty multimap");
-        sdsl::rrr_vector<>::select_1_type select(&_key_bs);
-
-        const value_t low = key != 0 ? select.select(key) : 0;
-        if (unlikely(low >= _size || _values[low] == 0)) {
-            debug_op(std::cout << " [" << low << ";" << low << "[ ");
-            return; // Empty set
-        }
-
-        const value_t high = select.select(key + 1);
-        debug_op(std::cout << " [" << low << ";" << high << "[ ");
-
-        value_t value = 0;
-        for (size_t idx = low; idx < high; idx++) {
-            assume(idx < _size, "idx out of bound");
-            assume(_values[idx] > 0, "found empty slot in range");
-            value += _values[idx];
+        auto [low, high] = get_bounds(key);
+        auto    it       = int_vector::const_iterator(&_values, low * _values.width());
+        value_t value    = 0;
+        for (size_type i = high - low; i-- > 0; it++) {
+            assert(*it > 0, "found empty slot in range");
+            value += *it;
             if (not f(value)) break;
         }
     }
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated key
-    key_t hot_fun get_key(size_t idx) const
+    key_t hot_fun get_key(size_type idx) const
     {
         check_idx(idx);
-        sdsl::rrr_vector<>::rank_1_type rank(&_key_bs);
+        rrr_vector::rank_1_type rank(&_key_bs);
         return rank.rank(idx); // Remember, public idx are shifted by one so we are ranking "unshifted idx" + 1
     }
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated value
-    value_t hot_fun get_value(size_t idx, key_t key) const
+    value_t hot_fun get_value(size_type idx, key_t key) const
     {
-        sdsl::rrr_vector<>::select_1_type select(&_key_bs);
-        size_t                            low = key != 0 ? select.select(key) : 0;
+        check_idx(idx);
+
+        auto low = low_bound(key);
         assert(low < _size, "key out of range");
 
-        check_idx(idx);
-        idx--; // Unshift the public idx
-
         value_t value = 0;
-        for (size_t i = low; i <= idx; i++) {
-            value_t delta = _values[i];
+        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
+        for (size_type i = idx - low; i-- > 0; ++it) {
+            value_t delta = *it;
             assume(delta > 0, "invalid value at %lu", i);
             value += delta;
         }
@@ -194,18 +187,17 @@ template<typename K, typename V> struct rrr_multimap
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated key
     /// Return max_value if the value or equal to max_value (optimization)
-    value_t hot_fun get_value(size_t idx, key_t key, value_t max_value) const
+    value_t hot_fun get_value(size_type idx, key_t key, value_t max_value) const
     {
-        sdsl::rrr_vector<>::select_1_type select(&_key_bs);
-        size_t                            low = key != 0 ? select.select(key) : 0;
+        check_idx(idx);
+
+        auto low = low_bound(key);
         assert(low < _size, "key out of range");
 
-        check_idx(idx);
-        idx--; // Unshift the public idx
-
         value_t value = 0;
-        for (size_t i = low; i <= idx; i++) {
-            value_t delta = _values[i];
+        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
+        for (size_type i = idx - low; i-- > 0; ++it) {
+            value_t delta = *it;
             assume(delta > 0, "invalid value at %lu", i);
             value += delta;
             if (value >= max_value) return max_value;
@@ -214,22 +206,40 @@ template<typename K, typename V> struct rrr_multimap
         return value;
     }
 
-    std::pair<key_t, value_t> get_key_value(size_t idx) const
+    std::pair<key_t, value_t> get_key_value(size_type idx) const
     {
         key_t key = get_key(idx);
         return {key, get_value(idx, key)};
     }
 
-    // Is the map empty (in which case it is illegal to query it)
-    operator bool() const { return _size > 0; }
-
   private:
-    sdsl::rrr_vector<> _key_bs{};
-    sdsl::int_vector<> _values{};
-    size_t             _size     = 0; // Number of integers in _values
-    size_t             max_delta = 0;
+    rrr_vector _key_bs{};
+    int_vector _values{};
+    size_type  _size = 0; // Number of integers in _values
 
-    void check_idx(size_t idx) const
+    size_type low_bound(key_t key) const { return key != 0 ? rrr_vector::select_1_type(&_key_bs).select(key) : 0; }
+
+    size_type high_bound(key_t key) const { return rrr_vector::select_1_type(&_key_bs).select(key + 1); }
+
+    std::pair<size_type, size_type> get_bounds(key_t key) const
+    {
+        assert(*this, "query on empty multimap");
+        auto sel = rrr_vector::select_1_type(&_key_bs);
+
+        auto low = key != 0 ? sel.select(key) : 0;
+        ;
+        if (unlikely(low >= _size || _values[low] == 0)) {
+            debug_op(std::cout << " [" << low << ";" << low << "[ ");
+            return {low, low}; // Empty set
+        }
+
+        const value_t high = sel.select(key + 1);
+        debug_op(std::cout << " [" << low << ";" << high << "[ ");
+
+        return {low, high};
+    }
+
+    void check_idx(size_type idx) const
     {
         assert(*this, "query on empty multimap");
         assume(idx > 0 && idx <= _size, "idx out of bound, should be 0 < %lu <= size=%lu", idx, _size);
