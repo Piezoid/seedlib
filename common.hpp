@@ -77,16 +77,6 @@ print_memreport(const memreport_t& report, std::ostream& _out = std::cerr)
     return _out;
 }
 
-// FIXME: move to gatb-lite utils
-struct nop_functor
-{
-    nop_functor() noexcept                   = default;
-    nop_functor(nop_functor&&) noexcept      = default;
-    nop_functor(const nop_functor&) noexcept = default;
-
-    template<typename... Args> void operator()(Args...) const noexcept {}
-};
-
 }
 
 #endif // COMMON_HPP

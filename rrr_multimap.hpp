@@ -15,6 +15,7 @@
 #include <sdsl/rrr_vector.hpp>
 
 #include <gatbl/sys/bits.hpp>
+#include <gatbl/utils/nop_functor.hpp>
 
 #include "common.hpp"
 
@@ -38,7 +39,7 @@ template<typename K, typename V> struct rrr_multimap
     operator bool() const { return _size > 0; }
 
     /// Records must be sorted by key, then value
-    template<typename Record, typename ExtrKeyF, typename ExtrValueF, typename OnInsert = const nop_functor&>
+    template<typename Record, typename ExtrKeyF, typename ExtrValueF, typename OnInsert = const gatbl::nop_functor&>
     rrr_multimap(std::vector<Record>&& records,
                  size_type             domain_size,        // Maximal key
                  size_type             image_size,         // Maximal value

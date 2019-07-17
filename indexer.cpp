@@ -5,138 +5,14 @@
 #include "rrr_multimap.hpp"
 #include "indexer.hpp"
 
-#include <gatbl/sys/file.hpp>
-#include <gatbl/fastx.hpp>
-#include <gatbl/kmer.hpp>
 #include <gatbl/sys/memory.hpp>
+#include <gatbl/sys/file.hpp>
+#include <gatbl/fastx2kmer.hpp>
 
 using namespace std;
 using namespace gatbl;
 
 namespace seedlib {
-
-template<typename KmerT, typename From = KmerT, bool masking = true> struct sub_kextractor
-{
-    using kmer_t       = KmerT;
-    using sized_kmer_t = sized_kmer<kmer_t>;
-
-    sub_kextractor(ksize_t k, ksize_t offset)
-      : mask_(bits::bitmask<From>(2 * k, 2 * offset))
-      , shift_(2 * offset)
-      , k_(k)
-    {
-        assert(2 * (k + offset) <= CHAR_BIT * sizeof(From), "k too large");
-    }
-
-    ksize_t size() const { return k_; }
-
-    ksize_t bits() const { return 2 * k_; }
-
-    size_t image_size() const { return size_t(mask_ >> shift_) + 1; }
-
-    sized_kmer_t operator()(no_conversion_kmer<From> kmer) const
-    {
-        return sized_kmer_t{kmer_t(mask(kmer) >> shift_), k_};
-    }
-
-    ssize_t compare(no_conversion_kmer<From> a, no_conversion_kmer<From> b) const { return ssize_t(mask(a)) - mask(b); }
-
-  protected:
-    From mask(From x) const
-    {
-        if (masking) {
-            return x & mask_;
-        } else {
-            assert(x <= this->mask_, "kmer larger than max value");
-            return x;
-        }
-    }
-
-    From    mask_;
-    ksize_t shift_, k_;
-};
-
-template<typename KmerT, typename From, bool masking = true> struct suffix_kextractor
-{
-    using kmer_t       = KmerT;
-    using sized_kmer_t = sized_kmer<kmer_t>;
-
-    suffix_kextractor(ksize_t k)
-      : mask_(bits::bitmask<kmer_t>(2 * k))
-      , k_(k)
-    {
-        assert(2 * k <= CHAR_BIT * sizeof(kmer_t), "k too large");
-    }
-
-    ksize_t size() const { return k_; }
-
-    ksize_t bits() const { return 2 * k_; }
-
-    size_t image_size() const { return size_t(mask_) + 1; }
-
-    sized_kmer_t operator()(no_conversion_kmer<From> kmer) const { return {mask(kmer), k_}; }
-
-    ssize_t compare(no_conversion_kmer<From> a, no_conversion_kmer<From> b) const
-    {
-        return typename std::make_signed<From>::type(mask(a)) - mask(b);
-    }
-
-  protected:
-    kmer_t mask(From x) const
-    {
-        if (masking) {
-            return x & mask_;
-        } else {
-            assert(x <= this->mask_, "kmer larger than max value");
-            return x;
-        }
-    }
-
-    kmer_t  mask_;
-    ksize_t k_;
-};
-
-template<typename KmerT, typename From, bool masking = false> struct prefix_kextractor
-{
-    using kmer_t       = KmerT;
-    using sized_kmer_t = sized_kmer<kmer_t>;
-
-    prefix_kextractor(ksize_t k, ksize_t offset)
-      : mask_(bits::bitmask<kmer_t>(2 * k))
-      , shift_(2 * offset)
-      , k_(k)
-    {
-        assert(2 * (k + offset) <= CHAR_BIT * sizeof(From), "k too large");
-    }
-
-    ksize_t size() const { return k_; }
-
-    ksize_t bits() const { return 2 * k_; }
-
-    size_t image_size() const { return mask_ + 1; }
-
-    sized_kmer_t operator()(no_conversion_kmer<From> kmer) const { return sized_kmer_t{mask(kmer >> shift_), k_}; }
-
-    ssize_t compare(no_conversion_kmer<From> a, no_conversion_kmer<From> b) const
-    {
-        // FIXME: performance
-        return ssize_t(mask(a >> shift_)) - ssize_t(mask(b >> shift_));
-    }
-
-  protected:
-    kmer_t mask(From x) const
-    {
-        if (masking) {
-            return x & mask_;
-        } else {
-            assert(x <= this->mask_, "kmer larger than max value");
-            return x;
-        }
-    }
-
-    KmerT   mask_;
-    ksize_t shift_, k_;
-};
 
 struct seed_types
 {
@@ -172,43 +48,6 @@ template<typename seed_types = seed_types> struct seed_model : public seed_types
     ksize_t b1_sz, b2_sz, b3_sz;
 };
 
-// FIXME: move to gatb-lite bits
-/// Retreive an unsigned integer stored as varible byte code
-/// The src_end is only for debugging purpose
-inline const uint8_t*
-load_int_vb(const uint8_t* src, const uint8_t* src_end, size_t& value)
-{
-    size_t _value = 0; // Avoid aliasing with src
-    size_t offset = 0;
-    while (*src >= uint8_t(128u)) {
-        assume(src < src_end, "Unfinished variable byte code");
-        assume(offset < bits::bitwidth<size_t>(), "variable byte code too long for size_t");
-        _value |= (*src++ & 127u) << offset;
-        offset += 7u;
-    }
-
-    assume(src < src_end, "Unfinished variable byte code");
-    assume(offset < bits::bitwidth<size_t>(), "variable byte code too long for size_t");
-    _value |= (*src++) << offset;
-    value = _value;
-    return src;
-}
-
-// FIXME: move to gatb-lite bits
-/// Store a integer as a variable byte code
-/// If space was sufficient, returns a pointer to the byte following the last byte code, otherwise dst_end
-/// FIXME: this doesn't allows to differentiate between overflow and exact fit (fine for our application)
-inline uint8_t*
-store_int_vb(uint8_t* dst, const uint8_t* dst_end, size_t value)
-{
-    while (value >= 128 & likely(dst < dst_end)) {
-        *dst++ = (value & 127u) | 128u;
-        value >>= 7u;
-    }
-    if (likely(dst < dst_end)) { *dst++ = uint8_t(value); }
-    return dst;
-}
-
 template<typename T> struct partition
 {
     static constexpr size_t page_size = 4 << 10;
@@ -232,10 +71,10 @@ template<typename T> struct partition
         _last_pos    = record.pos;
 
         while (true) { // For retrying after dump
-            uint8_t* p = store_int_vb(_buffer_ptr, _buffer_end, delta);
+            uint8_t* p = bits::store_int_vb(_buffer_ptr, _buffer_end, delta);
             if (p + sizeof(T) <= _buffer_end) {
                 size_t check_delta;
-                assert(load_int_vb(_buffer_ptr, p, check_delta) == p && check_delta == delta,
+                assert(bits::load_int_vb(_buffer_ptr, p, check_delta) == p && check_delta == delta,
                        "VB coding inconsistency");
 
                 *reinterpret_cast<T*>(p) = record.data;
@@ -274,7 +113,7 @@ template<typename T> struct partition
         const uint8_t* const last = mapping.end();
         for (const uint8_t* ptr = mapping.begin(); ptr < last;) {
             size_t delta;
-            ptr = load_int_vb(ptr, last, delta);
+            ptr = bits::load_int_vb(ptr, last, delta);
             pos += delta;
 
             assume(ptr + sizeof(T) <= last, "Not enough remaining space for block pair");
@@ -301,192 +140,6 @@ template<typename T> struct partition
     uint8_t* const             _buffer_end;
     size_t                     _last_pos = 0;
     size_t                     _nitems   = 0;
-};
-
-// FIXME: move to gatb-lite utils
-inline bool
-hasEnding(std::string const& fullString, std::string const& ending)
-{
-    if (fullString.length() >= ending.length()) {
-        return (0 == fullString.compare(fullString.length() - ending.length(), ending.length(), ending));
-    } else {
-        return false;
-    }
-}
-
-/// Convert sequence to kmers, with capabilities to avoid invalid chars and multiline FASTA
-template<typename KmerT = kmer_t, typename OnKmer = nop_functor, typename OnRunEnd = nop_functor> struct sequence2kmers
-{
-    using kmer_t = KmerT;
-    using arg_t  = positioned<sized_kmer<kmer_t>>;
-
-    sequence2kmers(ksize_t k, OnKmer&& on_kmer = {}, OnRunEnd&& on_run_end = {})
-
-      : _window(k)
-      , _window_unfilled_nucs(_window.size())
-      , _on_kmer(std::move(on_kmer))
-      , _on_run_end(std::move(on_run_end))
-    {}
-
-    // Push a sequence string
-
-    template<typename R> void feed(const R& r)
-    {
-        dna_ascii_range<R> seq(r);
-        // debug_op(std::cerr << "s: " << r << endl);
-
-        auto       it   = begin(seq);
-        const auto last = end(seq);
-        if (unlikely(_window_unfilled_nucs != 0)) it = fill(it, last);
-
-        for (; it != last;) {
-            while (unlikely(*it == nuc_t::N)) {
-                empty_window();
-                it = fill(it, last);
-                if (it == last) return;
-            }
-
-            _window.push_back(*it);
-            ++_pos;
-            ++it;
-
-            _on_kmer(arg_t{_window.forward(), _pos});
-        }
-    }
-
-    // Get the position of the next nucleotide
-    size_t get_next_pos() const { return _pos; }
-
-    // Signal the start of a chromosome/FASTA/Q sequence
-    void next_chrom()
-    {
-        _chrom_starts.push_back(_pos);
-        empty_window();
-    }
-
-    void read_fastx(const std::string fin)
-    {
-        gatbl::sys::file_descriptor fd(fin);
-        auto                        content = fd.mmap<const char>();
-        content.advise_hugepage();
-
-        if (hasEnding(fin, ".fq") || hasEnding(fin, ".fastq")) {
-            RANGES_FOR(auto& rec, sequence_range<fastq_record<>>(content))
-            {
-                next_chrom();
-                feed(rec.sequence());
-            }
-        } else if (hasEnding(fin, ".fa") || hasEnding(fin, ".fasta")) {
-            RANGES_FOR(auto& line, sequence_range<line_record<>>(content))
-            {
-                if (unlikely(size(line) == 0)) continue;
-                auto it = begin(line);
-                if (*it != '>') {
-                    feed(line);
-                } else {
-                    ++it;
-                    next_chrom();
-                }
-            }
-        } else {
-            throw std::runtime_error("unsupported file format");
-        }
-    }
-
-    // std::vector<size_t>&&      get_chrom_starts() && { return std::move(_chrom_starts); }
-    std::vector<size_t>&       get_chrom_starts() { return _chrom_starts; }
-    const std::vector<size_t>& get_chrom_starts() const { return _chrom_starts; }
-
-  protected:
-    void empty_window()
-    {
-        if (_window_unfilled_nucs == 0) { // We had a kmer
-            _on_run_end(arg_t{_window.forward(), _pos});
-        }
-        _window_unfilled_nucs = _window.size();
-    }
-
-    /// Fill the kmer window at the begining of a line or after Ns.
-    /// Filling can be done in mulitple call (eg when Ns span multiple lines)
-    template<typename It, typename S> It fill(It it, const S last)
-    {
-        for (; _window_unfilled_nucs > 0 && it != last; ++it, ++_pos) {
-            if (*it == nuc_t::N) { // Ns likely to follow N
-                empty_window();
-            } else {
-                _window.unchecked_push_back(*it);
-                --_window_unfilled_nucs;
-            }
-        }
-        if (_window_unfilled_nucs == 0) {
-            _window.mask(true);
-            _window.check();
-            _on_kmer(arg_t{_window.forward(), _pos});
-        }
-        return it;
-    }
-
-    std::vector<size_t> _chrom_starts;
-    kmer_window<kmer_t> _window;
-    size_t              _pos = 0;
-    ksize_t             _window_unfilled_nucs;
-    OnKmer              _on_kmer;
-    OnRunEnd            _on_run_end;
-};
-
-template<typename KmerT = kmer_t, typename OnKmer = nop_functor, typename OnRunEnd = nop_functor>
-sequence2kmers<KmerT, remove_reference_t<OnKmer>, remove_reference_t<OnRunEnd>>
-make_sequence2kmers(ksize_t k, OnKmer&& on_kmer = {}, OnRunEnd&& on_run_end = {})
-{
-    return {k, std::forward<OnKmer>(on_kmer), std::forward<OnRunEnd>(on_run_end)};
-}
-/// Compute 2-mer entropy inside kmer for complexity filtering
-/// The log2 entropy ranges from 0 to 4
-template<typename kmer_t = uint64_t> class entropy_filter
-{
-    using lktnum_t                        = uint16_t;
-    static constexpr double     precision = std::numeric_limits<lktnum_t>::max() * 1.884169; // * exp(1)/log(2)
-    std::unique_ptr<lktnum_t[]> _xlogx_lkt;
-    const size_t                _threshold;
-    const ksize_t               _n;
-
-    size_t hot_fun _entropy(kmer_t kmer) const
-    {
-        uint8_t counts[16] = {0};
-
-        for (int i = 0; i < _n; i++) {
-            counts[kmer & kmer_t(15u)]++;
-            kmer >>= 2;
-        }
-        assume(kmer < 4, "kmer larger than expected"); // A single base should remain
-
-        size_t ent = 0;
-        for (int i = 0; i < 16; i++) {
-            assume(counts[i] <= _n, "count out of range");
-            ent += _xlogx_lkt[counts[i]];
-        }
-
-        return ent;
-    }
-
-  public:
-    cold_fun entropy_filter(ksize_t k, double threshold = 3)
-      : _threshold(threshold * precision)
-      , _n(k - 1) // Number of 2-mers
-    {
-        // Tabulate the -p*log2(p) values
-        _xlogx_lkt     = make_unique<lktnum_t[]>(_n + 1);
-        _xlogx_lkt[0]  = 0;
-        _xlogx_lkt[_n] = 0;
-        for (int i = 1; i < _n; i++) {
-            double p      = i / double(_n);
-            _xlogx_lkt[i] = lktnum_t(-log2(p) * p * precision);
-        }
-    }
-
-    double entropy(kmer_t kmer) const { return double(_entropy(kmer)) / precision; }
-
-    bool hot_fun operator()(kmer_t kmer) const { return _entropy(kmer) >= _threshold; }
 };
 
 template<typename T>
