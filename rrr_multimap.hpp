@@ -28,7 +28,7 @@ template<typename K, typename V> struct rrr_multimap
     using int_vector = sdsl::int_vector<>;
     using rrr_vector = sdsl::rrr_vector<>;
     using size_type  = typename int_vector::size_type;
-    static_assert(gatbl::is_same_v<size_type, typename rrr_vector::size_type>, "size_types differs");
+    static_assert(std::is_same<size_type, typename rrr_vector::size_type>::value, "size_types differs");
 
     rrr_multimap()               = default;
     rrr_multimap(rrr_multimap&&) = default;

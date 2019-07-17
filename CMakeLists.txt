@@ -9,9 +9,6 @@ set(PROJECT_VENDOR "Maël Kerbiriou")
 set(PROJECT_CONTACT "mael.kerbiriou@free.fr")
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
 
 set(thirdparty_dir "thirdparty/")
 

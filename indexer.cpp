@@ -371,13 +371,14 @@ template<typename KmerT = kmer_t, typename OnKmer = nop_functor, typename OnRunE
         content.advise_hugepage();
 
         if (hasEnding(fin, ".fq") || hasEnding(fin, ".fastq")) {
-            for (auto& rec : sequence_range<fastq_record<>>(content)) {
+            RANGES_FOR(auto& rec, sequence_range<fastq_record<>>(content))
+            {
                 next_chrom();
                 feed(rec.sequence());
             }
         } else if (hasEnding(fin, ".fa") || hasEnding(fin, ".fasta")) {
-            for (auto line : sequence_range<line_record<>>(content)) {
-                using substring_t = typename decltype(line)::substring_t;
+            RANGES_FOR(auto& line, sequence_range<line_record<>>(content))
+            {
                 if (unlikely(size(line) == 0)) continue;
                 auto it = begin(line);
                 if (*it != '>') {
@@ -433,6 +434,12 @@ template<typename KmerT = kmer_t, typename OnKmer = nop_functor, typename OnRunE
     OnRunEnd            _on_run_end;
 };
 
+template<typename KmerT = kmer_t, typename OnKmer = nop_functor, typename OnRunEnd = nop_functor>
+sequence2kmers<KmerT, remove_reference_t<OnKmer>, remove_reference_t<OnRunEnd>>
+make_sequence2kmers(ksize_t k, OnKmer&& on_kmer = {}, OnRunEnd&& on_run_end = {})
+{
+    return {k, std::forward<OnKmer>(on_kmer), std::forward<OnRunEnd>(on_run_end)};
+}
 /// Compute 2-mer entropy inside kmer for complexity filtering
 /// The log2 entropy ranges from 0 to 4
 template<typename kmer_t = uint64_t> class entropy_filter
@@ -605,6 +612,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         operator bool() const { return nkmers > 0; }
     };
 
+    using seqkmer_t = positioned<sized_kmer<kmer_t>>; // Kmer type obtained from sequence2kmers
   public:
     using size_type = typename part_index::size_type;
 
@@ -627,8 +635,8 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             partitions.emplace_back(index_name + to_string(sized_kmer<block_t>{part_id, seed_model::b1_sz}));
 
         auto kmer_filter = entropy_filter<kmer_t>(kmer_size);
-        auto f2kmer      = sequence2kmers(kmer_size, [&](auto positioned_kmer) {
-            auto kmer = positioned_kmer.data.kmer;
+        auto f2kmer      = make_sequence2kmers<kmer_t>(kmer_size, [&](seqkmer_t positioned_kmer) {
+            auto kmer = positioned_kmer.data;
             if (not kmer_filter(kmer)) return;
             partitions[b1_extractor(kmer)].push_back(
               positioned_block_pair_t{b1b2_extractor(kmer), positioned_kmer.pos});
@@ -650,7 +658,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
                                 << std::endl));
 
             records.reserve(part.size());
-            part.iterate([&](auto posbp) {
+            part.iterate([&](positioned_block_pair_t posbp) {
                 records.emplace_back(posbp);
                 debug_op(auto reconstructed_kmer
                          = posbp.data | (block_t(&part - partitions.data()) << (2 * suffix_size)));
@@ -736,7 +744,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         size_t nqueries = 0; // FIXME: debug
 
         auto kmer_filter = entropy_filter<kmer_t>(kmer_size + 1);
-        auto f2kmer      = sequence2kmers(kmer_size + 1, [&](auto positioned_kmer) hot_fun {
+        auto f2kmer      = make_sequence2kmers<kmer_t>(kmer_size + 1, [&](seqkmer_t positioned_kmer) hot_fun {
             if (not kmer_filter(positioned_kmer.data)) return;
             debug_op((std::cerr << sized_kmer<kmer_t>{positioned_kmer.data, kmer_size + 1} << std::endl));
 
