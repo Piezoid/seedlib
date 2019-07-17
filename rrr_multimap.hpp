@@ -7,7 +7,7 @@
 
 #include <sdsl/int_vector.hpp>
 //#include <sdsl/vlc_vector.hpp>
-//#include <sdsl/dac_vector.hpp>
+#include <sdsl/dac_vector.hpp>
 //#include <sdsl/coder_comma.hpp>
 //#include <sdsl/coder_elias_delta.hpp>
 //#include <sdsl/coder_elias_gamma.hpp>
@@ -16,6 +16,7 @@
 
 #include <gatbl/sys/bits.hpp>
 #include <gatbl/utils/nop_functor.hpp>
+#include <gatbl/utils/iterator_pair.hpp>
 
 #include "common.hpp"
 
@@ -26,8 +27,8 @@ template<typename K, typename V> struct rrr_multimap
 {
     using key_t      = K;
     using value_t    = V;
-    using int_vector = sdsl::int_vector<>;
-    using rrr_vector = sdsl::rrr_vector<>;
+    using rrr_vector = sdsl::rrr_vector<15>;
+    using int_vector = sdsl::dac_vector_dp<rrr_vector>;
     using size_type  = typename int_vector::size_type;
     static_assert(std::is_same<size_type, typename rrr_vector::size_type>::value, "size_types differs");
 
@@ -58,7 +59,6 @@ template<typename K, typename V> struct rrr_multimap
         key_t     prev_key   = 0; // Detect transition from one set to the next
         value_t   prev_value = 0; // Delta encoding of values inside each set
         size_type slot_idx   = 0; // Current slot
-        size_type max_delta  = 0; // Maximum delta value
 
         for (auto& rec : records) {
             auto key = extract_key(rec);
@@ -82,7 +82,6 @@ template<typename K, typename V> struct rrr_multimap
             assume(prev_value < value, "values are not sorted: %llu !< %llu", prev_value, value);
             value_t delta = value - prev_value;
             prev_value    = value;
-            if (max_delta < delta) max_delta = delta;
             assert(delta < std::numeric_limits<tmpdelta_t>::max(), "Delta value larger than supported");
             assume(slot_idx < max_bits, "slot_idx out of bounds");
             values[slot_idx++] = delta; // Delta encoded and shifted for avoiding the special 0 value
@@ -97,15 +96,8 @@ template<typename K, typename V> struct rrr_multimap
         tmp_keybs.resize(_size);
         _key_bs = {std::move(tmp_keybs)};
 
-        _values.width(gatbl::bits::ilog2p1(max_delta));
-        _values.resize(_size);
-        const tmpdelta_t* src = values.get();
-        auto              dst = _values.begin();
-        for (size_type i = _size; i-- > 0; ++src, ++dst) {
-            assert(*src < 1ul << _values.width(), "value out of range");
-            *dst = *src;
-        }
-        assert(dst == _values.end(), "iterator not ended");
+        _values = {gatbl::iterator_pair<const tmpdelta_t*>{values.get(), _size}};
+        auto it = values.get();
         values.reset();
 
 #ifndef NDEBUG
@@ -168,11 +160,10 @@ template<typename K, typename V> struct rrr_multimap
     template<typename F> hot_fun void iterate_set(key_t key, F&& f) const
     {
         auto [low, high] = get_bounds(key);
-        auto    it       = int_vector::const_iterator(&_values, low * _values.width());
         value_t value    = 0;
-        for (size_type i = high - low; i-- > 0; it++) {
-            assert(*it > 0, "found empty slot in range");
-            value += *it;
+        for (size_type i = low; i < high; i++) {
+            assert(_values[i] > 0, "found empty slot in range");
+            value += _values[i];
             if (not f(value)) break;
         }
     }
@@ -194,9 +185,8 @@ template<typename K, typename V> struct rrr_multimap
         assert(low < _size, "key out of range");
 
         value_t value = 0;
-        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
-        for (size_type i = idx - low; i-- > 0; ++it) {
-            value_t delta = *it;
+        for (size_type i = low; i < idx; i++) {
+            value_t delta = _values[i];
             assume(delta > 0, "invalid value at %lu", i);
             value += delta;
         }
@@ -214,9 +204,8 @@ template<typename K, typename V> struct rrr_multimap
         assert(low < _size, "key out of range");
 
         value_t value = 0;
-        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
-        for (size_type i = idx - low; i-- > 0; ++it) {
-            value_t delta = *it;
+        for (size_type i = low; i < idx; i++) {
+            value_t delta = _values[i];
             assume(delta > 0, "invalid value at %lu", i);
             value += delta;
             if (value >= max_value) return max_value;
