@@ -129,6 +129,24 @@ template<typename K, typename V> struct rrr_multimap
 #endif
     }
 
+    size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+    {
+        sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
+        size_type                  written_bytes = 0;
+        written_bytes += sdsl::write_member(_size, out, child, "size");
+        written_bytes += _key_bs.serialize(out, child, "key_bs");
+        written_bytes += _values.serialize(out, child, "values");
+        sdsl::structure_tree::add_size(child, written_bytes);
+        return written_bytes;
+    }
+
+    void load(std::istream& in)
+    {
+        sdsl::read_member(_size, in);
+        _key_bs.load(in);
+        _values.load(in);
+    }
+
     void stat(memreport_t& report, const std::string& prefix = "") const
     {
         report[prefix + "::bitvector"] += size_in_bytes(_key_bs);

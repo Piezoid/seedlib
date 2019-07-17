@@ -55,6 +55,8 @@ set( sdsl_SRCS
 	"${SDSL_LIB_DIR}/bits.cpp"
 	"${SDSL_LIB_DIR}/util.cpp"
 	"${SDSL_LIB_DIR}/ram_fs.cpp"
+        "${SDSL_LIB_DIR}/ram_filebuf.cpp"
+        "${SDSL_LIB_DIR}/sfstream.cpp"
 	"${SDSL_LIB_DIR}/memory_management.cpp"
 	"${SDSL_LIB_DIR}/rrr_vector_15.cpp"
 )

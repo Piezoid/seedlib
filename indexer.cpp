@@ -151,6 +151,7 @@ template<typename seed_types = seed_types> struct seed_model : public seed_types
     using typename seed_types::blockpair_t;
     using typename seed_types::kmer_t;
 
+    seed_model() = default;
     seed_model(ksize_t b1, ksize_t b2 = 0, ksize_t b3 = 0)
       : b1_sz(b1)
       , b2_sz(b2 ? b2 : b1)
@@ -168,7 +169,7 @@ template<typename seed_types = seed_types> struct seed_model : public seed_types
 
     prefix_kextractor<block_t, blockpair_t> get_extractor_blockpair2b2() const { return {b2_sz, b3_sz}; }
 
-    const ksize_t b1_sz, b2_sz, b3_sz;
+    ksize_t b1_sz, b2_sz, b3_sz;
 };
 
 // FIXME: move to gatb-lite bits
@@ -500,6 +501,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     {
         using int_vector = sdsl::int_vector<0>;
         using multimap   = rrr_multimap<block_t, size_t>;
+        using size_type  = typename multimap::size_type;
 
         multimap b2_to_pos{};
         multimap b3_to_b2{};
@@ -576,6 +578,24 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
 #endif
         }
 
+        size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+        {
+            sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
+            size_type                  written_bytes = 0;
+            written_bytes += sdsl::write_member(nkmers, out, child, "nkmers");
+            written_bytes += b2_to_pos.serialize(out, child, "b2_to_pos");
+            written_bytes += b3_to_b2.serialize(out, child, "b3_to_b2");
+            sdsl::structure_tree::add_size(child, written_bytes);
+            return written_bytes;
+        }
+
+        void load(std::istream& in)
+        {
+            sdsl::read_member(nkmers, in);
+            b2_to_pos.load(in);
+            b3_to_b2.load(in);
+        }
+
         void stat(memreport_t& report, const std::string& prefix = "") const
         {
             b2_to_pos.stat(report, prefix + "::b2_to_pos");
@@ -586,6 +606,10 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     };
 
   public:
+    using size_type = typename part_index::size_type;
+
+    seedlib_index() = default; // default construct before deserilization
+
     template<typename SeedModel>
     seedlib_index(const file_list& fq_in, const std::string& index_name, SeedModel&& sm)
       : seed_model(std::forward<SeedModel>(sm))
@@ -637,7 +661,31 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         };
     }
 
-    block_t npartitions() const { return seed_model::b1_extractor.image_size(); }
+    size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+    {
+        sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
+        size_type                  written_bytes = 0;
+        written_bytes += sdsl::write_member(static_cast<const seed_model&>(*this), out, child, "seed_model");
+        written_bytes += sdsl::serialize(_chrom_starts, out, child, "chrom_starts");
+        auto nparts = npartitions();
+        for (auto& part : _partitions) {
+            written_bytes += part.serialize(out, child, "b2_to_pos");
+        }
+        sdsl::structure_tree::add_size(child, written_bytes);
+        return written_bytes;
+    }
+
+    void load(std::istream& in)
+    {
+        sdsl::read_member(static_cast<seed_model&>(*this), in);
+        sdsl::load(_chrom_starts, in);
+        _partitions = decltype(_partitions)(npartitions());
+        for (auto& part : _partitions) {
+            part.load(in);
+        }
+    }
+
+    block_t npartitions() const { return seed_model::get_extractor_kmer2b1().image_size(); }
 
     void stat(memreport_t& report, const std::string& prefix = "") const
     {
@@ -772,7 +820,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
 
     std::vector<part_index> _partitions   = {};
     std::vector<size_t>     _chrom_starts = {};
-    const std::string       name;
+    std::string             name;
 };
 
 void
@@ -783,7 +831,13 @@ build_index(const file_list& fq_in, const std::string& index_name)
     limits.rlim_cur = limits.rlim_max; // 32 + (rlim_t(1) << (2 * b));
     sys::check_ret(setrlimit(RLIMIT_NOFILE, &limits), "setrlimit");
 
-    seedlib_index<> index(fq_in, index_name, 5);
+    {
+        seedlib_index<> index(fq_in, index_name, 5);
+        sdsl::store_to_file(index, index_name);
+    }
+
+    seedlib_index<> index{};
+    sdsl::load_from_file(index, index_name);
 
     memreport_t report{};
     index.stat(report);
