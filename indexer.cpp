@@ -288,19 +288,23 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             partitions.emplace_back(index_name + to_string(sized_kmer<block_t>{part_id, seed_model::b1_sz}));
 
         auto kmer_filter = entropy_filter<kmer_t>(kmer_size);
-        auto f2kmer      = make_sequence2kmers<kmer_t>(kmer_size, [&](seqkmer_t positioned_kmer) {
-            auto kmer = positioned_kmer.data;
-            if (not kmer_filter(kmer)) return;
-            partitions[b1_extractor(kmer)].push_back(
-              positioned_block_pair_t{b1b2_extractor(kmer), positioned_kmer.pos});
-        });
+        auto f2kmer      = make_sequence2kmers<kmer_window<kmer_t>>(
+          kmer_size,
+          [&](auto& f2kmer) {
+              auto kmer = f2kmer.get_window().forward();
+              if (not kmer_filter(kmer)) return;
+              partitions[b1_extractor(kmer)].push_back(
+                positioned_block_pair_t{b1b2_extractor(kmer), f2kmer.get_next_pos()});
+          },
+          [&](auto& f2kmer) { // On chrom start
+              _chrom_starts.emplace_back(f2kmer.get_next_pos());
+              return true;
+          });
         for (auto fin : fq_in)
             f2kmer.read_fastx(fin);
 
         for (auto& part : partitions)
             part.seal();
-
-        _chrom_starts = std::move(f2kmer.get_chrom_starts());
 
         cout << "Loading partitions..." << endl;
 
@@ -397,11 +401,12 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         size_t nqueries = 0; // FIXME: debug
 
         auto kmer_filter = entropy_filter<kmer_t>(kmer_size + 1);
-        auto f2kmer      = make_sequence2kmers<kmer_t>(kmer_size + 1, [&](seqkmer_t positioned_kmer) hot_fun {
-            if (not kmer_filter(positioned_kmer.data)) return;
-            debug_op((std::cerr << sized_kmer<kmer_t>{positioned_kmer.data, kmer_size + 1} << std::endl));
+        auto f2kmer      = make_sequence2kmers<kmer_window<kmer_t>>(kmer_size + 1, [&](auto& f2kmer) hot_fun {
+            kmer_t kmer = f2kmer.get_window().forward();
+            if (not kmer_filter(kmer)) return;
+            debug_op((std::cerr << sized_kmer<kmer_t>{kmer, kmer_size + 1} << std::endl));
 
-            size_t query_pos   = positioned_kmer.pos - 1;
+            size_t query_pos   = f2kmer.get_next_pos() - 1;
             auto   emit_result = [&](const char* kind, size_t target_pos) hot_fun {
                 if (target_pos >= query_pos) return false;
                 std::cout << kind << query_pos - kmer_size << "\t" << target_pos - kmer_size << "\n";
@@ -411,16 +416,16 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             };
 
             nqueries++;
-            auto  b1   = b1_extractor(positioned_kmer);
+            auto  b1   = b1_extractor(kmer);
             auto& part = _partitions[b1];
             if (unlikely(not part)) return;
 
-            blockpair_t suffix = b2insb3_extractor(positioned_kmer);
+            blockpair_t suffix = b2insb3_extractor(kmer);
 
             block_t query_b2 = b2ins_extractor(suffix);
             auto    query_b3 = b3_extractor(suffix);
             debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz + 1} << " " << query_b3
-                                << " " << positioned_kmer.pos << std::endl));
+                                << " " << query_pos << std::endl));
             part.b3_to_b2.iterate_set(query_b3, [&](size_t b2_idx) hot_fun {
                 block_t target_b2 = part.b2_to_pos.get_key(b2_idx);
                 debug_op(
@@ -456,7 +461,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             query_b2 = b2ins_extractor(suffix);
             query_b3 = b3_extractor(suffix);
             debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz - 1} << " " << query_b3
-                                << " " << positioned_kmer.pos << std::endl));
+                                << " " << query_pos << std::endl));
 
             part.b3_to_b2.iterate_set(query_b3, [&](size_t b2_idx) hot_fun {
                 block_t target_b2 = part.b2_to_pos.get_key(b2_idx);
