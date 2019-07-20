@@ -51,23 +51,29 @@ template<typename K, typename V> struct rrr_multimap
         size_type max_bits
           = size(records) + domain_size - 1; // Maximal size of the bitvector in the extreme case: all keys are
                                              // the same, the other sets are empty but still taking each one bit
-        using tmpdelta_t        = uint32_t;
-        auto             values = gatbl::make_unique<tmpdelta_t[]>(max_bits);
-        sdsl::bit_vector tmp_keybs(max_bits, 0);
+        using tmpdelta_t = uint32_t;
+        int_vector values{};
+        values.width(gatbl::bits::ilog2p1(image_size));
+        values.resize(max_bits);
 
-        key_t     prev_key   = 0; // Detect transition from one set to the next
-        value_t   prev_value = 0; // Delta encoding of values inside each set
-        size_type slot_idx   = 0; // Current slot
-        size_type max_delta  = 0; // Maximum delta value
+        int_vector key_to_high_idx{};
+        key_to_high_idx.width(gatbl::bits::ilog2(max_bits));
+        key_to_high_idx.resize(domain_size);
+
+        key_t     prev_key  = 0; // Detect transition from one set to the next
+        size_type slot_idx  = 0; // Current slot
+        size_type max_delta = 0; // Maximum delta value
 
         for (auto& rec : records) {
             auto key = extract_key(rec);
+            assert(key < domain_size, "key out of bound");
             assert(key >= prev_key, "key are not sorted");
             // Handle increase in key and empty sets
             if (unlikely(prev_key < key)) {
                 while (true) {
                     assume(slot_idx < max_bits, "slot_idx out of bounds");
-                    tmp_keybs[slot_idx] = true; // Mark the start of a new set (slot_idx point to the next entry)
+                    assert(prev_key < key_to_high_idx.size(), "key out of range");
+                    key_to_high_idx[prev_key] = slot_idx;
                     prev_key++;
                     if (unlikely(prev_key < key)) {
                         values[slot_idx++] = 0; // special value for empty set
@@ -75,38 +81,33 @@ template<typename K, typename V> struct rrr_multimap
                         break;
                     }
                 };
-                prev_value = 0;
             }
 
-            auto value = extract_value(rec);
-            assume(prev_value < value, "values are not sorted: %llu !< %llu", prev_value, value);
-            value_t delta = value - prev_value;
-            prev_value    = value;
-            if (max_delta < delta) max_delta = delta;
-            assert(delta < std::numeric_limits<tmpdelta_t>::max(), "Delta value larger than supported");
             assume(slot_idx < max_bits, "slot_idx out of bounds");
-            values[slot_idx++] = delta; // Delta encoded and shifted for avoiding the special 0 value
+
+            auto value = extract_value(rec);
+            assume(value > 0, "value out of range");
+            assert(value < 1ul << values.width(), "value out of range");
+            values[slot_idx++] = value; // Delta encoded and shifted for avoiding the special 0 value
 
             on_insert(rec, slot_idx); // Public idx are shifted by one to be >= 1
         }
+
+        for (; prev_key < domain_size; prev_key++) {
+            key_to_high_idx[prev_key] = slot_idx;
+            values[slot_idx++]        = 0;
+        }
+
         _size = slot_idx;
 
 #ifdef NDEBUG
         records.clear();
 #endif
-        tmp_keybs.resize(_size);
-        _key_bs = {std::move(tmp_keybs)};
 
-        _values.width(gatbl::bits::ilog2p1(max_delta));
-        _values.resize(_size);
-        const tmpdelta_t* src = values.get();
-        auto              dst = _values.begin();
-        for (size_type i = _size; i-- > 0; ++src, ++dst) {
-            assert(*src < 1ul << _values.width(), "value out of range");
-            *dst = *src;
-        }
-        assert(dst == _values.end(), "iterator not ended");
-        values.reset();
+        values.resize(_size);
+        _values = std::move(values);
+
+        _key_to_high_idx = std::move(key_to_high_idx);
 
 #ifndef NDEBUG
         for (auto& rec : records) {
@@ -135,8 +136,8 @@ template<typename K, typename V> struct rrr_multimap
         sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
         size_type                  written_bytes = 0;
         written_bytes += sdsl::write_member(_size, out, child, "size");
-        written_bytes += _key_bs.serialize(out, child, "key_bs");
         written_bytes += _values.serialize(out, child, "values");
+        written_bytes += _key_to_high_idx.serialize(out, child, "_key_to_high_idx");
         sdsl::structure_tree::add_size(child, written_bytes);
         return written_bytes;
     }
@@ -144,13 +145,12 @@ template<typename K, typename V> struct rrr_multimap
     void load(std::istream& in)
     {
         sdsl::read_member(_size, in);
-        _key_bs.load(in);
         _values.load(in);
+        _key_to_high_idx.load(in);
     }
 
     void stat(memreport_t& report, const std::string& prefix = "") const
     {
-        report[prefix + "::bitvector"] += size_in_bytes(_key_bs);
         report[prefix + "::integers"] += size_in_bytes(_values);
 
         //        report[prefix + "::integers_ed"] +=
@@ -168,12 +168,10 @@ template<typename K, typename V> struct rrr_multimap
     template<typename F> hot_fun void iterate_set(key_t key, F&& f) const
     {
         auto [low, high] = get_bounds(key);
-        auto    it       = int_vector::const_iterator(&_values, low * _values.width());
-        value_t value    = 0;
+        auto it          = int_vector::const_iterator(&_values, low * _values.width());
         for (size_type i = high - low; i-- > 0; it++) {
             assert(*it > 0, "found empty slot in range");
-            value += *it;
-            if (not f(value)) break;
+            if (not f(*it)) break;
         }
     }
 
@@ -181,47 +179,23 @@ template<typename K, typename V> struct rrr_multimap
     key_t hot_fun get_key(size_type idx) const
     {
         check_idx(idx);
-        rrr_vector::rank_1_type rank(&_key_bs);
-        return rank.rank(idx); // Remember, public idx are shifted by one so we are ranking "unshifted idx" + 1
+
+        auto it = std::upper_bound(_key_to_high_idx.begin(), _key_to_high_idx.end(), idx - 1);
+
+        key_t k2 = it - _key_to_high_idx.begin();
+
+        return k2;
     }
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated value
-    value_t hot_fun get_value(size_type idx, key_t key) const
+    value_t hot_fun get_value(size_type idx,
+                              key_t     key       = 0,
+                              value_t   max_value = 0) const // FIXME last two fileds not used anymore
     {
         check_idx(idx);
 
-        auto low = low_bound(key);
-        assert(low < _size, "key out of range");
-
-        value_t value = 0;
-        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
-        for (size_type i = idx - low; i-- > 0; ++it) {
-            value_t delta = *it;
-            assume(delta > 0, "invalid value at %lu", i);
-            value += delta;
-        }
-
-        return value;
-    }
-
-    /// Given an indice handed to the on_insert callback during consturction, find the associated key
-    /// Return max_value if the value or equal to max_value (optimization)
-    value_t hot_fun get_value(size_type idx, key_t key, value_t max_value) const
-    {
-        check_idx(idx);
-
-        auto low = low_bound(key);
-        assert(low < _size, "key out of range");
-
-        value_t value = 0;
-        auto    it    = int_vector::const_iterator(&_values, low * _values.width());
-        for (size_type i = idx - low; i-- > 0; ++it) {
-            value_t delta = *it;
-            assume(delta > 0, "invalid value at %lu", i);
-            value += delta;
-            if (value >= max_value) return max_value;
-        }
-
+        auto value = _values[--idx];
+        assert(value != 0, "invalid value at %lu", idx);
         return value;
     }
 
@@ -232,28 +206,29 @@ template<typename K, typename V> struct rrr_multimap
     }
 
   private:
-    rrr_vector _key_bs{};
     int_vector _values{};
+    int_vector _key_to_high_idx{};
     size_type  _size = 0; // Number of integers in _values
 
-    size_type low_bound(key_t key) const { return key != 0 ? rrr_vector::select_1_type(&_key_bs).select(key) : 0; }
+    size_type low_bound(key_t key) const { return key > 0 ? _key_to_high_idx[key - 1] : 0; }
 
-    size_type high_bound(key_t key) const { return rrr_vector::select_1_type(&_key_bs).select(key + 1); }
+    size_type high_bound(key_t key) const { return _key_to_high_idx[key]; }
 
     std::pair<size_type, size_type> get_bounds(key_t key) const
     {
         assert(*this, "query on empty multimap");
-        auto sel = rrr_vector::select_1_type(&_key_bs);
+        assert(_key_to_high_idx.size() > 0, "wtf");
 
-        auto low = key != 0 ? sel.select(key) : 0;
-        ;
-        if (unlikely(low >= _size || _values[low] == 0)) {
+        size_t low = key > 0 ? _key_to_high_idx[key - 1] : 0;
+        if (unlikely(_values[low] == 0)) {
             debug_op(std::cout << " [" << low << ";" << low << "[ ");
             return {low, low}; // Empty set
         }
 
-        const value_t high = sel.select(key + 1);
+        size_t high = _key_to_high_idx[key];
         debug_op(std::cout << " [" << low << ";" << high << "[ ");
+
+        // assert(high == x, "high mismatch");
 
         return {low, high};
     }
