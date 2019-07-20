@@ -18,16 +18,32 @@ namespace seedlib {
 
 struct seed_types
 {
-    using kmer_t      = uint64_t;
-    using blockpair_t = uint32_t;
-    using block_t     = uint16_t;
+    using kmer_t    = uint64_t;
+    using kmerins_t = uint64_t;
+    using b2b3_t    = uint32_t;
+    using b2insb3_t = uint32_t;
+    using b2delb3_t = uint32_t;
+    using b3_t      = uint32_t;
+    using b1_t      = uint16_t;
+    using b2_t      = uint16_t;
+    using b2ins_t   = uint16_t;
+    using b2del_t   = uint16_t;
+
+    enum class seed_kind { B1B2, B1B2B3, B1B2MisB3, B1B2InsB3, B1B2DelB3 };
 };
 
 template<typename seed_types = seed_types> struct seed_model : public seed_types
 {
-    using typename seed_types::block_t;
-    using typename seed_types::blockpair_t;
+    using typename seed_types::b1_t;
+    using typename seed_types::b2_t;
+    using typename seed_types::b2b3_t;
+    using typename seed_types::b2del_t;
+    using typename seed_types::b2delb3_t;
+    using typename seed_types::b2ins_t;
+    using typename seed_types::b2insb3_t;
+    using typename seed_types::b3_t;
     using typename seed_types::kmer_t;
+    using typename seed_types::kmerins_t;
 
     seed_model() = default;
     seed_model(ksize_t b1, ksize_t b2 = 0, ksize_t b3 = 0)
@@ -39,13 +55,17 @@ template<typename seed_types = seed_types> struct seed_model : public seed_types
   public:
     using type_traits = seed_types;
 
-    prefix_kextractor<block_t, kmer_t> get_extractor_kmer2b1() const { return {b1_sz, ksize_t(b2_sz + b3_sz)}; }
+    // Block extrators for kmer (index construction)
+    prefix_kextractor<b1_t, kmer_t>   kmer_to_b1() const { return {b1_sz, ksize_t(b2_sz + b3_sz)}; }
+    suffix_kextractor<b2b3_t, kmer_t> kmer_to_blockpair() const { return {ksize_t(b2_sz + b3_sz)}; }
+    prefix_kextractor<b2_t, b2b3_t>   blockpair_to_b2() const { return {b2_sz, b3_sz}; }
+    suffix_kextractor<b3_t, b2b3_t>   blockpair_to_b3() const { return {b3_sz}; }
 
-    suffix_kextractor<blockpair_t, kmer_t> get_extractor_kmer2blockpair() const { return {ksize_t(b2_sz + b3_sz)}; }
-
-    suffix_kextractor<block_t, blockpair_t> get_extractor_blockpair2b3() const { return {b3_sz}; }
-
-    prefix_kextractor<block_t, blockpair_t> get_extractor_blockpair2b2() const { return {b2_sz, b3_sz}; }
+    // Block extrators for kmer with insertion (for queries)
+    prefix_kextractor<b1_t, kmerins_t>      kmerins_to_b1() const { return {b1_sz, ksize_t(b2_sz + 1 + b3_sz)}; }
+    suffix_kextractor<b2insb3_t, kmerins_t> kmerins_to_b2insb3() const { return {ksize_t(b2_sz + 1 + b3_sz)}; }
+    prefix_kextractor<b2ins_t, b2insb3_t>   b2insb3_to_b2ins() const { return {ksize_t(b2_sz + 1), b3_sz}; }
+    suffix_kextractor<b3_t, b2insb3_t>      b2insb3_to_b3() const { return {b3_sz}; }
 
     ksize_t b1_sz, b2_sz, b3_sz;
 };
@@ -151,49 +171,87 @@ doNotOptimize(T const& val)
     asm volatile("" : : "g"(val) : "memory");
 }
 
-template<typename seed_model = seed_model<>> class seedlib_index : protected seed_model
+static inline hot_fun bool
+test_1indel_match(kmer_t x, kmer_t y, ksize_t lena)
+{
+    assume(lena >= 1, "kmer to short");
+    kmer_t mask = 3 << 2u * (lena - 1); // Two high bits on the first char of x
+
+    kmer_t delta = x ^ (y >> 2u); // Compare x and shifted y
+    while (not(delta & mask)) {
+        mask >>= 2u;
+        if (not mask) return true;
+    }
+
+    delta = x ^ y; // Skip a base on y after that
+    while (mask) {
+        if (delta & mask) return false;
+        mask >>= 2u;
+    }
+    return true;
+}
+
+static inline hot_fun bool
+test_1sub_match(kmer_t a, kmer_t b)
+{
+    kmer_t delta = a ^ b;
+    delta |= (delta >> 1) & kmer_t(0x5555555555555555ull);
+    return popcount(delta) <= 2;
+}
+
+template<typename seed_model = seed_model<>> class seedlib_index : public seed_model
 {
 
-    using typename seed_model::block_t;
-    using typename seed_model::blockpair_t;
-    using typename seed_model::kmer_t;
-    using positioned_block_pair_t = positioned<blockpair_t>;
+    using typename seed_types::b1_t;
+    using typename seed_types::b2_t;
+    using typename seed_types::b2b3_t;
+    using typename seed_types::b2del_t;
+    using typename seed_types::b2delb3_t;
+    using typename seed_types::b2ins_t;
+    using typename seed_types::b2insb3_t;
+    using typename seed_types::b3_t;
+    using typename seed_types::kmer_t;
+    using typename seed_types::kmerins_t;
+    using positioned_b2b3_t = positioned<b2b3_t>;
 
+    using pos_t          = size_t;
+    using chrom_starts_t = reversible_interval_index<std::vector<size_t>, 10>;
+
+  public:
     struct part_index
     {
-        using int_vector = sdsl::int_vector<0>;
-
+        using seed_kind = typename seed_model::seed_kind;
         // using vec_t      = typename sdsl::dac_vector_dp<sdsl::rrr_vector<15u>>;
         using vec_t = sdsl::int_vector<>;
-        sets_array<block_t, size_t, vec_t, reversible_interval_index<std::vector<uint32_t>>> b2_to_pos{};
-        sets_array<block_t, size_t, vec_t, interval_index<std::vector<uint32_t>>>            b3_to_b2{};
+        sets_array<b2_t, size_t, vec_t, reversible_interval_index<std::vector<uint32_t>>> b2_to_pos{};
+        sets_array<b3_t, size_t, vec_t, interval_index<std::vector<uint32_t>>>            b3_to_b2{};
         using size_type = typename vec_t::size_type;
         size_type nkmers;
 
         part_index() = default;
 
-        part_index(const seedlib_index& index, std::vector<positioned_block_pair_t>& records)
+        part_index(const seedlib_index& index, std::vector<positioned_b2b3_t>& records)
         {
-            const auto b3_extractor = index.get_extractor_blockpair2b3();
-            const auto b2_extractor = index.get_extractor_blockpair2b2();
-            using b3_b2idx_t        = positioned<block_t>; // b3 block with index in b2_to_pos map
+            const auto b3_extractor = index.blockpair_to_b3();
+            const auto b2_extractor = index.blockpair_to_b2();
+            using b3_to_b2idx_t     = positioned<b3_t>; // b3 block with index in b2_to_pos map
 
             nkmers = records.size();
             if (nkmers == 0) return;
 
             size_t max_pos = records.back().pos;
-            std::sort(begin(records), end(records), positioned_block_pair_t::get_comparator(b2_extractor));
+            std::sort(begin(records), end(records), positioned_b2b3_t::get_comparator(b2_extractor));
 
-            std::vector<b3_b2idx_t> b3_to_b2idx_pairs;
+            std::vector<b3_to_b2idx_t> b3_to_b2idx_pairs;
             b3_to_b2idx_pairs.reserve(records.size());
 
             b2_to_pos = {std::move(records),
                          b2_extractor.image_size(),
                          max_pos,
                          b2_extractor,
-                         [&](positioned_block_pair_t& rec) { return rec.pos; },
-                         [&](const positioned_block_pair_t& rec, size_t idx) {
-                             b3_to_b2idx_pairs.emplace_back(b3_b2idx_t{b3_extractor(rec), idx});
+                         [&](positioned_b2b3_t& rec) { return rec.pos; },
+                         [&](const positioned_b2b3_t& rec, size_t idx) {
+                             b3_to_b2idx_pairs.emplace_back(b3_to_b2idx_t{b3_extractor(rec), idx});
                          }};
 
             size_t max_b2_idx = b3_to_b2idx_pairs.back().pos;
@@ -203,8 +261,8 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             b3_to_b2 = {std::move(b3_to_b2idx_pairs),
                         b3_extractor.image_size(),
                         max_b2_idx,
-                        [](const positioned<block_t>& rec) { return rec.data; },
-                        [](const positioned<block_t>& rec) { return rec.pos; }};
+                        [](const b3_to_b2idx_t& rec) { return rec.data; },
+                        [](const b3_to_b2idx_t& rec) { return rec.pos; }};
 
 #ifdef DEBUG
             for (auto rec : records) {
@@ -214,7 +272,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
                 debug_op((std::cerr << b2 << "," << b3 << ":" << rec.pos));
 
                 bool found = false;
-                b2_to_pos.iterate_set(b2.kmer, [&](size_t pos) {
+                b2_to_pos.iterate_set(b2, [&](size_t pos) {
                     bool is_target = rec.pos == pos;
                     found |= is_target;
                     return not is_target;
@@ -222,9 +280,9 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
                 assert(found, "position not found in the b2_to_pos");
 
                 found = false;
-                b3_to_b2.iterate_set(b3.kmer, [&](size_t b2_idx) {
-                    block_t recovered_b2 = b2_to_pos.get_key(b2_idx);
-                    size_t  pos          = b2_to_pos.get_value(b2_idx, recovered_b2);
+                b3_to_b2.iterate_set(b3, [&](size_t b2_idx) {
+                    b2_t   recovered_b2 = b2_to_pos.get_key(b2_idx);
+                    size_t pos          = b2_to_pos.get_value(b2_idx, recovered_b2);
                     if (rec.pos == pos) {
                         found = true;
                         assert(recovered_b2 == b2.kmer, "b3->b2 mismatch b2=%ld != %ld", b2.kmer, recovered_b2);
@@ -265,9 +323,6 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
 
         operator bool() const { return nkmers > 0; }
     };
-
-    using seqkmer_t = positioned<sized_kmer<kmer_t>>; // Kmer type obtained from sequence2kmers
-  public:
     using size_type = typename part_index::size_type;
 
     seedlib_index() = default; // default construct before deserilization
@@ -280,14 +335,16 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     {
         const ksize_t suffix_size    = seed_model::b2_sz + seed_model::b3_sz;
         const ksize_t kmer_size      = seed_model::b1_sz + suffix_size;
-        const auto    b1_extractor   = seed_model::get_extractor_kmer2b1();
-        const auto    b1b2_extractor = seed_model::get_extractor_kmer2blockpair();
+        const auto    b1_extractor   = seed_model::kmer_to_b1();
+        const auto    b1b2_extractor = seed_model::kmer_to_blockpair();
         const size_t  npartitions    = b1_extractor.image_size();
 
-        std::vector<partition<blockpair_t>> partitions;
+        std::vector<size_t> seq_ends;
+
+        std::vector<partition<b2b3_t>> partitions;
         partitions.reserve(npartitions);
-        for (block_t part_id = 0; part_id < npartitions; part_id++)
-            partitions.emplace_back(index_name + to_string(sized_kmer<block_t>{part_id, seed_model::b1_sz}));
+        for (b1_t part_id = 0; part_id < npartitions; part_id++)
+            partitions.emplace_back(index_name + to_string(sized_kmer<b1_t>{part_id, seed_model::b1_sz}));
 
         auto kmer_filter = entropy_filter<kmer_t>(kmer_size, _entropy_thresh);
         auto f2kmer      = make_sequence2kmers<kmer_window<kmer_t>>(
@@ -295,11 +352,11 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
           [&](auto& f2kmer) {
               auto kmer = f2kmer.get_window().forward();
               if (not kmer_filter(kmer)) return;
-              partitions[b1_extractor(kmer)].push_back(
-                positioned_block_pair_t{b1b2_extractor(kmer), f2kmer.get_next_pos()});
+              partitions[b1_extractor(kmer)].push_back(positioned_b2b3_t{b1b2_extractor(kmer), f2kmer.get_pos()});
           },
-          [&](auto& f2kmer) { // On chrom start
-              _chrom_starts.emplace_back(f2kmer.get_next_pos());
+          [&](auto& f2kmer) { // On new sequence
+              size_t next_seq_start = f2kmer.get_next_pos();
+              if (likely(next_seq_start != 0)) seq_ends.emplace_back(next_seq_start);
               return true;
           });
         for (auto fin : fq_in)
@@ -308,19 +365,21 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         for (auto& part : partitions)
             part.seal();
 
-        cout << "Loading partitions..." << endl;
+        f2kmer.start(); // Simulate a new sequence such that we get then ending position of the last one
+        _seq_index = std::move(seq_ends);
 
-        std::vector<positioned_block_pair_t> records;
+        std::cerr << "Loading partitions..." << endl;
+
+        std::vector<positioned_b2b3_t> records;
         _partitions.reserve(npartitions);
         for (auto& part : partitions) {
-            debug_op((std::cerr << "block " << sized_kmer<block_t>{block_t(&part - partitions.data()), this->b1_sz}
-                                << std::endl));
+            debug_op((b1_t part_id = sized_kmer<b1_t>{b1_t(&part - partitions.data()), this->b1_sz}));
+            debug_op(std::cerr << "block " << part_id << std::endl);
 
             records.reserve(part.size());
-            part.iterate([&](positioned_block_pair_t posbp) {
+            part.iterate([&](positioned_b2b3_t posbp) {
                 records.emplace_back(posbp);
-                debug_op(auto reconstructed_kmer
-                         = posbp.data | (block_t(&part - partitions.data()) << (2 * suffix_size)));
+                debug_op(auto reconstructed_kmer = posbp.data | (kmer_t(part_id.kmer) << (2 * suffix_size)));
                 debug_op((std::cerr << sized_kmer<kmer_t>{reconstructed_kmer, kmer_size} << " " << posbp.pos << endl));
             });
             _partitions.emplace_back(*this, records);
@@ -334,7 +393,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         size_type                  written_bytes = 0;
         written_bytes += sdsl::write_member(static_cast<const seed_model&>(*this), out, child, "seed_model");
         written_bytes += sdsl::write_member(_entropy_thresh, out, child, "entropy_thresh");
-        written_bytes += sdsl::serialize(_chrom_starts, out, child, "chrom_starts");
+        written_bytes += _seq_index.serialize(out, child, "chrom_starts");
         auto nparts = npartitions();
         for (auto& part : _partitions) {
             written_bytes += part.serialize(out, child, "b2_to_pos");
@@ -347,48 +406,30 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     {
         sdsl::read_member(static_cast<seed_model&>(*this), in);
         sdsl::read_member(_entropy_thresh, in);
-        sdsl::load(_chrom_starts, in);
+        _seq_index.load(in);
         _partitions = decltype(_partitions)(npartitions());
         for (auto& part : _partitions) {
             part.load(in);
         }
     }
 
-    block_t npartitions() const { return seed_model::get_extractor_kmer2b1().image_size(); }
+    size_t npartitions() const { return seed_model::kmer_to_b1().image_size(); }
+
+    const part_index& get_part(b1_t b1) const
+    {
+        assert(b1 < _partitions.size(), "b1 out of range");
+        return _partitions[b1];
+    }
 
     void stat(memreport_t& report, const std::string& prefix = "") const
     {
         for (const auto& part : _partitions)
             part.stat(report, prefix + "::partitions");
 
-        report[prefix + "::chrom_starts"] += sizeof(size_t) * _chrom_starts.size();
+        _seq_index.stat(report, prefix + "::chrom_starts");
     }
 
-    static inline hot_fun bool test_1indel_match(kmer_t x, kmer_t y, ksize_t lena)
-    {
-        assume(lena >= 1, "kmer to short");
-        kmer_t mask = 3 << 2u * (lena - 1); // Two high bits on the first char of x
-
-        kmer_t delta = x ^ (y >> 2u); // Compare x and shifted y
-        while (not(delta & mask)) {
-            mask >>= 2u;
-            if (not mask) return true;
-        }
-
-        delta = x ^ y; // Skip a base on y after that
-        while (mask) {
-            if (delta & mask) return false;
-            mask >>= 2u;
-        }
-        return true;
-    }
-
-    static inline hot_fun bool test_1sub_match(kmer_t a, kmer_t b)
-    {
-        kmer_t delta = a ^ b;
-        delta |= (delta >> 1) & kmer_t(0x5555555555555555ull);
-        return popcount(delta) <= 2;
-    }
+    double get_entropy_threshold() const { return _entropy_thresh; }
 
     // FIXME: Self mapping only for now
     // FIXME: make lower level query interface
@@ -397,10 +438,10 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         const ksize_t suffix_size = seed_model::b2_sz + seed_model::b3_sz;
         const ksize_t kmer_size   = seed_model::b1_sz + suffix_size;
 
-        auto b1_extractor      = prefix_kextractor<block_t, kmer_t>(seed_model::b1_sz, suffix_size + 1);
-        auto b2insb3_extractor = suffix_kextractor<blockpair_t, kmer_t>(suffix_size + 1);
-        auto b3_extractor      = seed_model::get_extractor_blockpair2b3();
-        auto b2ins_extractor   = prefix_kextractor<block_t, blockpair_t>(seed_model::b2_sz + 1, seed_model::b3_sz);
+        auto b1_extractor      = prefix_kextractor<b1_t, kmer_t>(seed_model::b1_sz, suffix_size + 1);
+        auto b2insb3_extractor = suffix_kextractor<b2insb3_t, kmer_t>(suffix_size + 1);
+        auto b3_extractor      = seed_model::blockpair_to_b3();
+        auto b2ins_extractor   = prefix_kextractor<b2ins_t, b2insb3_t>(seed_model::b2_sz + 1, seed_model::b3_sz);
 
         size_t nqueries = 0; // FIXME: debug
 
@@ -424,16 +465,15 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             auto& part = _partitions[b1];
             if (unlikely(not part)) return;
 
-            blockpair_t suffix = b2insb3_extractor(kmer);
+            b2insb3_t suffix = b2insb3_extractor(kmer);
 
-            block_t query_b2 = b2ins_extractor(suffix);
-            auto    query_b3 = b3_extractor(suffix);
-            debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz + 1} << " " << query_b3
+            auto query_b2 = b2ins_extractor(suffix);
+            auto query_b3 = b3_extractor(suffix);
+            debug_op((std::cerr << b1 << " " << sized_kmer<b2ins_t>{query_b2, seed_model::b2_sz + 1} << " " << query_b3
                                 << " " << query_pos << std::endl));
             part.b3_to_b2.iterate_set(query_b3, [&](size_t b2_idx) hot_fun {
-                block_t target_b2 = part.b2_to_pos.get_key(b2_idx);
-                debug_op(
-                  (std::cerr << " candiate b2:" << sized_kmer<block_t>{target_b2, seed_model::b2_sz} << std::endl));
+                b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
+                debug_op((std::cerr << " candiate b2:" << sized_kmer<b2_t>{target_b2, seed_model::b2_sz} << std::endl));
                 if (test_1indel_match(target_b2, query_b2, seed_model::b2_sz)) {
                     emit_result("0I0\t", part.b2_to_pos.get_value(b2_idx, target_b2, query_pos));
                 }
@@ -443,7 +483,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             suffix >>= 2;
             query_b2 = b2ins_extractor(suffix);
             /*query_b3 = b3_extractor(suffix);
-            debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz} << " " << query_b3
+            debug_op((std::cerr << b1 << " " << sized_kmer<b2_t>{query_b2, seed_model::b2_sz} << " " << query_b3
                                 << " " << positioned_kmer.pos << std::endl));
 
 
@@ -457,21 +497,20 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
                 }
             }); */
 
-            debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz} << std::endl));
+            debug_op((std::cerr << b1 << " " << sized_kmer<b2_t>{query_b2, seed_model::b2_sz} << std::endl));
             part.b2_to_pos.iterate_set(query_b2,
                                        [&](size_t target_pos) hot_fun { return emit_result("00 \t", target_pos); });
 
             suffix >>= 2;
             query_b2 = b2ins_extractor(suffix);
             query_b3 = b3_extractor(suffix);
-            debug_op((std::cerr << b1 << " " << sized_kmer<block_t>{query_b2, seed_model::b2_sz - 1} << " " << query_b3
+            debug_op((std::cerr << b1 << " " << sized_kmer<b2del_t>{query_b2, seed_model::b2_sz - 1} << " " << query_b3
                                 << " " << query_pos << std::endl));
 
             part.b3_to_b2.iterate_set(query_b3, [&](size_t b2_idx) hot_fun {
-                block_t target_b2 = part.b2_to_pos.get_key(b2_idx);
-                debug_op(
-                  (std::cerr << " candiate b2:" << sized_kmer<block_t>{target_b2, seed_model::b2_sz} << std::endl));
-                if (test_1indel_match(get_kmer(query_b2) >> 2u, target_b2, seed_model::b2_sz - 1)) {
+                b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
+                debug_op((std::cerr << " candiate b2:" << sized_kmer<b2_t>{target_b2, seed_model::b2_sz} << std::endl));
+                if (test_1indel_match(query_b2, target_b2, seed_model::b2_sz - 1)) {
                     emit_result("0D0\t", part.b2_to_pos.get_value(b2_idx, target_b2, query_pos));
                 }
                 return true;
@@ -489,10 +528,221 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     }
 
     std::vector<part_index> _partitions     = {};
-    std::vector<size_t>     _chrom_starts   = {};
+    chrom_starts_t          _seq_index      = {};
     double                  _entropy_thresh = 0;
     std::string             name;
 };
+
+template<typename seed_model = seed_model<>> struct index_query : protected seed_model
+{
+
+    using index_t = seedlib_index<seed_model>;
+    using typename seed_model::b1_t;
+    using typename seed_model::b2_t;
+    using typename seed_model::b2ins_t;
+    using typename seed_model::b2insb3_t;
+    using typename seed_model::b3_t;
+    using typename seed_model::kmerins_t;
+    using typename seed_model::seed_kind;
+    using part_index = typename index_t::part_index;
+
+  public:
+    index_query(const index_t& index)
+      : seed_model(index)
+      , _index(index)
+      , kmer_filter(index.b1_sz + index.b2_sz + 1 + index.b3_sz, index.get_entropy_threshold())
+      , kmerins_to_b1(seed_model::kmerins_to_b1())
+      , kmerins_to_b2insb3(seed_model::kmerins_to_b2insb3())
+      , b2insb3_to_b2ins(seed_model::b2insb3_to_b2ins())
+      , b2insb3_to_b3(seed_model::b2insb3_to_b3())
+
+    {}
+
+    /// Map a (b2, b3) with one insertion in b2, b2 size is b2_sz + 1
+    template<typename F> void query_b2insb3(const part_index& part, b2_t b2, b3_t b3, F&& f) const
+    {
+        assert(b2 < (kmer_t(1u) << 2 * (seed_model::b2_sz + 1)), "kmer larger than expected");
+        part.b3_to_b2.iterate_set(b3, [&](size_t b2_idx) hot_fun {
+            b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
+            if (test_1indel_match(target_b2, b2, seed_model::b2_sz)) {
+                f(part.b2_to_pos.get_value(b2_idx, target_b2), seed_kind::B1B2InsB3);
+            }
+            return true;
+        });
+    }
+
+    /// Map a b2
+    template<typename F> void query_b2(const part_index& part, b2_t b2, F&& f) const
+    {
+        assert(b2 < kmer_t(1u) << 2 * (seed_model::b2_sz), "kmer larger than expected");
+        part.b2_to_pos.iterate_set(b2, [&](size_t pos) {
+            f(pos, seed_kind::B1B2);
+            return true;
+        });
+    }
+
+    /// Map a (b2, b3) with one substitution in b2, b2 size is b2_sz
+    template<typename F> void query_b2b3(const part_index& part, b2_t b2, b3_t b3, F&& f) const
+    {
+        assert(b2 < kmer_t(1u) << 2 * (seed_model::b2_sz), "kmer larger than expected");
+        part.b3_to_b2.iterate_set(b3, [&](size_t b2_idx) {
+            b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
+            bool match     = b2 == target_b2;
+            if (match || test_1sub_match(b2, target_b2)) {
+                f(part.b2_to_pos.get_value(b2_idx, target_b2), match ? seed_kind::B1B2B3 : seed_kind::B1B2MisB3);
+            }
+            return true;
+        });
+    }
+
+    /// Map a (b2, b3) with one deletion in b2, b2 size is b2_sz - 1
+    template<typename F> void query_b2delb3(const part_index& part, b2_t b2, b3_t b3, F&& f) const
+    {
+        assert(b2 < kmer_t(1u) << 2 * (seed_model::b2_sz - 1), "kmer larger than expected");
+        part.b3_to_b2.iterate_set(b3, [&](size_t b2_idx) hot_fun {
+            b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
+            debug_op((std::cerr << " candiate b2:" << sized_kmer<b2_t>{target_b2, seed_model::b2_sz} << std::endl));
+            if (test_1indel_match(b2, target_b2, seed_model::b2_sz - 1)) {
+                f(part.b2_to_pos.get_value(b2_idx, target_b2), seed_kind::B1B2DelB3);
+            }
+            return true;
+        });
+    }
+
+    /// Do the 3 (or 4 when do_query_b2b3=true) kinds of query from a b1+b2+1+b3-mer
+    /// The sub b1+b2+b3-mer, b1+b2-1+b3-mer or b1+b2-mer are extracted as prefix of the b1+b2+1+b3-mer
+    template<typename F> void hot_fun query(kmerins_t kmer, F&& f, bool do_query_b2b3 = false) const
+    {
+        if (not kmer_filter(kmer)) return;
+
+        const auto& part = _index.get_part(kmerins_to_b1(kmer));
+        if (unlikely(not part)) return;
+
+        b2insb3_t b2insb3 = kmerins_to_b2insb3(kmer); // b2+1+b3-mer
+        auto      b2      = b2insb3_to_b2ins(b2insb3);
+        auto      b3      = b2insb3_to_b3(b2insb3);
+        query_b2insb3(part, b2, b3, f);
+
+        b2insb3 >>= 2; // b2+b3-mer
+        b2 = b2insb3_to_b2ins(b2insb3);
+        b3 = b2insb3_to_b3(b2insb3);
+        query_b2(part, b2, f);
+        if (do_query_b2b3) query_b2b3(part, b2, b3, f);
+
+        b2insb3 >>= 2; // b2-1+b3-mer
+        b2 = b2insb3_to_b2ins(b2insb3);
+        b3 = b2insb3_to_b3(b2insb3);
+        query_b2delb3(part, b2, b3, f);
+    }
+
+    /// Perform missing queries at the end of a sequence when sliding a b1+b2+1+b3 window.
+    /// Since the sub b1+b2+b3-mer, b1+b2-1+b3-mer or b1+b2-mer are only extracted from prefix in query(), a sliding
+    /// window implementation will miss some queries at the end of a sequence.
+    template<typename F> void query_run_end(kmerins_t kmer, F&& f, bool do_query_b2b3 = false) const
+    {
+
+        auto b1_extractor = prefix_kextractor<b1_t, kmerins_t, true>{
+          seed_model::b1_sz, ksize_t(seed_model::b2_sz + 1 + seed_model::b3_sz)};
+
+        kmer <<= 2; // b1+b2+b3-mer
+        size_t offset        = 1;
+        auto   f_with_offset = [&](size_t target_pos, seed_kind kind) { f(target_pos, kind, offset); };
+        for (ksize_t k = seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz;
+             k >= seed_model::b1_sz + seed_model::b2_sz;
+             --k, kmer <<= 2, ++offset) {
+            const auto& part = _index.get_part(b1_extractor(kmer));
+            if (unlikely(not part)) return;
+            b2insb3_t b2insb3 = kmerins_to_b2insb3(kmer); // b2+1+b3-mer (AA-suffixed)
+
+            b2insb3 >>= 2; // b2+b3-mer
+            auto b2 = b2insb3_to_b2ins(b2insb3);
+            query_b2(part, b2, f_with_offset);
+
+            if (k >= seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz - 1) {
+                if (do_query_b2b3 && k >= seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz) {
+                    query_b2b3(part, b2insb3_to_b2ins(b2insb3), b2, f_with_offset);
+                }
+
+                b2insb3 >>= 2; // b2-1+b3-mer
+                query_b2delb3(part, b2insb3_to_b2ins(b2insb3), b2insb3_to_b3(b2insb3), f_with_offset);
+            }
+        }
+    }
+
+  private:
+    const index_t&         _index;
+    entropy_filter<kmer_t> kmer_filter;
+
+    prefix_kextractor<b1_t, kmerins_t>      kmerins_to_b1;
+    suffix_kextractor<b2insb3_t, kmerins_t> kmerins_to_b2insb3;
+    prefix_kextractor<b2ins_t, b2insb3_t>   b2insb3_to_b2ins;
+    suffix_kextractor<b3_t, b2insb3_t>      b2insb3_to_b3;
+};
+
+template<typename seed_model = seed_model<>>
+class seq_query
+  : public gatbl::details::sequence2kmers_base<seq_query<seed_model>,
+                                               gatbl::kmer_window<typename seed_model::kmerins_t>>
+  , public index_query<seed_model>
+{
+
+    using query_base = index_query<seed_model>;
+    using typename query_base::index_t;
+    using typename seed_model::kmerins_t;
+    using typename seed_model::seed_kind;
+    using seq_base   = gatbl::details::sequence2kmers_base<seq_query<seed_model>, gatbl::kmer_window<kmerins_t>>;
+    using part_index = typename index_t::part_index;
+
+  public:
+    seq_query(const index_t& index)
+      : seq_base(index.b2_sz + index.b3_sz + index.b1_sz + 1)
+      , query_base(index)
+    {}
+
+    void hot_fun on_kmer()
+    {
+
+        const char* kinds_str[] = {"00 ", "000", "0M0", "0I0", "0D0"};
+
+        auto onmatch = [&](size_t target_pos, seed_kind kind) {
+            size_t query_pos = seq_base::get_pos();
+            //            if (target_pos >= query_pos) return;
+            //            std::cout << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" << target_pos
+            //            << "\n";
+            doNotOptimize(query_pos);
+            doNotOptimize(target_pos);
+        };
+
+        query_base::query(seq_base::get_window().forward(), onmatch);
+    }
+    void on_run_end()
+    {
+        return;
+
+        const char* kinds_str[] = {"00 ", "000", "0M0", "0I0", "0D0"};
+
+        auto onmatch = [&](size_t target_pos, seed_kind kind, size_t offset) {
+            size_t query_pos = seq_base::get_pos() + offset;
+            //            if (target_pos >= query_pos) return;
+            //            std::cout << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" << target_pos
+            //            << " (re)\n";
+            doNotOptimize(query_pos);
+            doNotOptimize(target_pos);
+        };
+
+        query_base::query_run_end(seq_base::get_window().forward(), onmatch);
+    }
+    bool on_chrom() { return true; }
+};
+
+void
+query(const file_list& fq_in, const seedlib_index<seed_model<>>& idx)
+{
+
+    seq_query query_instance{idx};
+    for (const auto& fastx : fq_in)
+        query_instance.read_fastx(fastx);
+}
 
 void
 build_index(const file_list& fq_in, const std::string& index_name)
@@ -503,7 +753,7 @@ build_index(const file_list& fq_in, const std::string& index_name)
     sys::check_ret(setrlimit(RLIMIT_NOFILE, &limits), "setrlimit");
 
     {
-        seedlib_index<> index(fq_in, index_name, 5);
+        seedlib_index<> index(fq_in, index_name, 5, 3.0);
         sdsl::store_to_file(index, index_name);
     }
 
@@ -514,7 +764,8 @@ build_index(const file_list& fq_in, const std::string& index_name)
     index.stat(report);
     print_memreport(report);
 
-    index.query(fq_in);
+    // index.query(fq_in);
+    query(fq_in, index);
 }
 
 } // namespace seedlib
