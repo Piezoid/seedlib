@@ -2,7 +2,9 @@
 #include <iostream>
 #include <sys/resource.h>
 
-#include "rrr_multimap.hpp"
+//#include <sdsl/dac_vector.hpp>
+
+#include "sets_array.hpp"
 #include "indexer.hpp"
 
 #include <gatbl/sys/memory.hpp>
@@ -160,12 +162,13 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     struct part_index
     {
         using int_vector = sdsl::int_vector<0>;
-        using multimap   = rrr_multimap<block_t, size_t>;
-        using size_type  = typename multimap::size_type;
 
-        multimap b2_to_pos{};
-        multimap b3_to_b2{};
-        size_t   nkmers;
+        // using vec_t      = typename sdsl::dac_vector_dp<sdsl::rrr_vector<15u>>;
+        using vec_t = sdsl::int_vector<>;
+        sets_array<block_t, size_t, vec_t, reversible_interval_index<std::vector<uint32_t>>> b2_to_pos{};
+        sets_array<block_t, size_t, vec_t, interval_index<std::vector<uint32_t>>>            b3_to_b2{};
+        using size_type = typename vec_t::size_type;
+        size_type nkmers;
 
         part_index() = default;
 
@@ -184,26 +187,24 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
             std::vector<b3_b2idx_t> b3_to_b2idx_pairs;
             b3_to_b2idx_pairs.reserve(records.size());
 
-            b2_to_pos = multimap(
-              std::move(records),
-              b2_extractor.image_size(),
-              max_pos,
-              b2_extractor,
-              [&](positioned_block_pair_t& rec) { return rec.pos; },
-              [&](const positioned_block_pair_t& rec, size_t idx) {
-                  b3_to_b2idx_pairs.emplace_back(b3_b2idx_t{b3_extractor(rec), idx});
-              });
+            b2_to_pos = {std::move(records),
+                         b2_extractor.image_size(),
+                         max_pos,
+                         b2_extractor,
+                         [&](positioned_block_pair_t& rec) { return rec.pos; },
+                         [&](const positioned_block_pair_t& rec, size_t idx) {
+                             b3_to_b2idx_pairs.emplace_back(b3_b2idx_t{b3_extractor(rec), idx});
+                         }};
 
             size_t max_b2_idx = b3_to_b2idx_pairs.back().pos;
 
             std::sort(begin(b3_to_b2idx_pairs), end(b3_to_b2idx_pairs));
 
-            b3_to_b2 = multimap(
-              std::move(b3_to_b2idx_pairs),
-              b3_extractor.image_size(),
-              max_b2_idx,
-              [](const positioned<block_t>& rec) { return rec.data; },
-              [](const positioned<block_t>& rec) { return rec.pos; });
+            b3_to_b2 = {std::move(b3_to_b2idx_pairs),
+                        b3_extractor.image_size(),
+                        max_b2_idx,
+                        [](const positioned<block_t>& rec) { return rec.data; },
+                        [](const positioned<block_t>& rec) { return rec.pos; }};
 
 #ifdef DEBUG
             for (auto rec : records) {
