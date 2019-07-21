@@ -272,9 +272,10 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     seedlib_index() = default; // default construct before deserilization
 
     template<typename SeedModel>
-    seedlib_index(const file_list& fq_in, const std::string& index_name, SeedModel&& sm)
+    seedlib_index(const file_list& fq_in, const std::string& index_name, SeedModel&& sm, double entropy_thresh = 0)
       : seed_model(std::forward<SeedModel>(sm))
       , name(index_name)
+      , _entropy_thresh(entropy_thresh)
     {
         const ksize_t suffix_size    = seed_model::b2_sz + seed_model::b3_sz;
         const ksize_t kmer_size      = seed_model::b1_sz + suffix_size;
@@ -287,7 +288,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         for (block_t part_id = 0; part_id < npartitions; part_id++)
             partitions.emplace_back(index_name + to_string(sized_kmer<block_t>{part_id, seed_model::b1_sz}));
 
-        auto kmer_filter = entropy_filter<kmer_t>(kmer_size);
+        auto kmer_filter = entropy_filter<kmer_t>(kmer_size, _entropy_thresh);
         auto f2kmer      = make_sequence2kmers<kmer_window<kmer_t>>(
           kmer_size,
           [&](auto& f2kmer) {
@@ -331,6 +332,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
         size_type                  written_bytes = 0;
         written_bytes += sdsl::write_member(static_cast<const seed_model&>(*this), out, child, "seed_model");
+        written_bytes += sdsl::write_member(_entropy_thresh, out, child, "entropy_thresh");
         written_bytes += sdsl::serialize(_chrom_starts, out, child, "chrom_starts");
         auto nparts = npartitions();
         for (auto& part : _partitions) {
@@ -343,6 +345,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
     void load(std::istream& in)
     {
         sdsl::read_member(static_cast<seed_model&>(*this), in);
+        sdsl::read_member(_entropy_thresh, in);
         sdsl::load(_chrom_starts, in);
         _partitions = decltype(_partitions)(npartitions());
         for (auto& part : _partitions) {
@@ -400,7 +403,7 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
 
         size_t nqueries = 0; // FIXME: debug
 
-        auto kmer_filter = entropy_filter<kmer_t>(kmer_size + 1);
+        auto kmer_filter = entropy_filter<kmer_t>(kmer_size + 1, _entropy_thresh);
         auto f2kmer      = make_sequence2kmers<kmer_window<kmer_t>>(kmer_size + 1, [&](auto& f2kmer) hot_fun {
             kmer_t kmer = f2kmer.get_window().forward();
             if (not kmer_filter(kmer)) return;
@@ -484,8 +487,9 @@ template<typename seed_model = seed_model<>> class seedlib_index : protected see
         std::cerr << nqueries << " queries, " << double(time_ns.count()) / nqueries << "ns per queries" << std::endl;
     }
 
-    std::vector<part_index> _partitions   = {};
-    std::vector<size_t>     _chrom_starts = {};
+    std::vector<part_index> _partitions     = {};
+    std::vector<size_t>     _chrom_starts   = {};
+    double                  _entropy_thresh = 0;
     std::string             name;
 };
 
