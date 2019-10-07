@@ -1,5 +1,6 @@
 #include <string>
 #include <iostream>
+#include <chrono>
 #include <sys/resource.h>
 
 //#include <sdsl/dac_vector.hpp>
@@ -166,9 +167,9 @@ template<typename T> struct partition
 
 template<typename T>
 void
-doNotOptimize(T const& val)
+doNotOptimize(T&& t)
 {
-    asm volatile("" : : "g"(val) : "memory");
+    __asm__ __volatile__("" ::"g"(t));
 }
 
 static inline hot_fun bool
@@ -582,12 +583,13 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
     }
 
     /// Map a (b2, b3) with one substitution in b2, b2 size is b2_sz
-    template<typename F> void query_b2b3(const part_index& part, b2_t b2, b3_t b3, F&& f) const
+    template<typename F> void query_b2b3(const part_index& part, b2_t b2, b3_t b3, bool reportexact, F&& f) const
     {
         assert(b2 < kmer_t(1u) << 2 * (seed_model::b2_sz), "kmer larger than expected");
         part.b3_to_b2.iterate_set(b3, [&](size_t b2_idx) {
             b2_t target_b2 = part.b2_to_pos.get_key(b2_idx);
             bool match     = b2 == target_b2;
+            if (match && !reportexact) return true;
             if (match || test_1sub_match(b2, target_b2)) {
                 f(part.b2_to_pos.get_value(b2_idx, target_b2), match ? seed_kind::B1B2B3 : seed_kind::B1B2MisB3);
             }
@@ -611,7 +613,7 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
 
     /// Do the 3 (or 4 when do_query_b2b3=true) kinds of query from a b1+b2+1+b3-mer
     /// The sub b1+b2+b3-mer, b1+b2-1+b3-mer or b1+b2-mer are extracted as prefix of the b1+b2+1+b3-mer
-    template<typename F> void hot_fun query(kmerins_t kmer, F&& f, bool do_query_b2b3 = false) const
+    template<typename F> void hot_fun query(kmerins_t kmer, F&& f, bool reportexact = false) const
     {
         if (not kmer_filter(kmer)) return;
 
@@ -627,7 +629,7 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
         b2 = b2insb3_to_b2ins(b2insb3);
         b3 = b2insb3_to_b3(b2insb3);
         query_b2(part, b2, f);
-        if (do_query_b2b3) query_b2b3(part, b2, b3, f);
+        query_b2b3(part, b2, b3, reportexact, f);
 
         b2insb3 >>= 2; // b2-1+b3-mer
         b2 = b2insb3_to_b2ins(b2insb3);
@@ -638,7 +640,7 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
     /// Perform missing queries at the end of a sequence when sliding a b1+b2+1+b3 window.
     /// Since the sub b1+b2+b3-mer, b1+b2-1+b3-mer or b1+b2-mer are only extracted from prefix in query(), a sliding
     /// window implementation will miss some queries at the end of a sequence.
-    template<typename F> void query_run_end(kmerins_t kmer, F&& f, bool do_query_b2b3 = false) const
+    template<typename F> void query_run_end(kmerins_t kmer, F&& f) const
     {
 
         auto b1_extractor = prefix_kextractor<b1_t, kmerins_t, true>{
@@ -647,11 +649,20 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
         kmer <<= 2; // b1+b2+b3-mer
         size_t offset        = 1;
         auto   f_with_offset = [&](size_t target_pos, seed_kind kind) { f(target_pos, kind, offset); };
+
+        //        std::cout << seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz << " "
+        //                  << seed_model::b1_sz + seed_model::b2_sz << std::endl;
+
         for (ksize_t k = seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz;
              k >= seed_model::b1_sz + seed_model::b2_sz;
              --k, kmer <<= 2, ++offset) {
+
+            //            std::cout << b1_extractor(kmer) << std::endl;
+            //            auto debug = prefix_kextractor<kmerins_t, kmerins_t, true>{k, offset}(kmer);
+            //            std::cout << int(k) << " " << offset << " " << debug << std::endl;
+
             const auto& part = _index.get_part(b1_extractor(kmer));
-            if (unlikely(not part)) return;
+            if (unlikely(not part)) continue;
             b2insb3_t b2insb3 = kmerins_to_b2insb3(kmer); // b2+1+b3-mer (AA-suffixed)
 
             b2insb3 >>= 2; // b2+b3-mer
@@ -659,8 +670,8 @@ template<typename seed_model = seed_model<>> struct index_query : protected seed
             query_b2(part, b2, f_with_offset);
 
             if (k >= seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz - 1) {
-                if (do_query_b2b3 && k >= seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz) {
-                    query_b2b3(part, b2insb3_to_b2ins(b2insb3), b2, f_with_offset);
+                if (k >= seed_model::b1_sz + seed_model::b2_sz + seed_model::b3_sz) {
+                    query_b2b3(part, b2insb3_to_b2ins(b2insb3), b2, false, f_with_offset);
                 }
 
                 b2insb3 >>= 2; // b2-1+b3-mer
@@ -697,42 +708,72 @@ class seq_query
     seq_query(const index_t& index)
       : seq_base(index.b2_sz + index.b3_sz + index.b1_sz + 1)
       , query_base(index)
+      , _first_kmer(true)
     {}
 
     void hot_fun on_kmer()
     {
-
         const char* kinds_str[] = {"00 ", "000", "0M0", "0I0", "0D0"};
-
-        auto onmatch = [&](size_t target_pos, seed_kind kind) {
-            size_t query_pos = seq_base::get_pos();
-            //            if (target_pos >= query_pos) return;
-            //            std::cout << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" << target_pos
-            //            << "\n";
+        std::string marker      = "F ";
+        auto        onmatch     = [&](size_t target_pos, seed_kind kind, size_t offset = 0) {
+            size_t query_pos = seq_base::get_pos() + offset;
+            // if (query_pos > target_pos) return;
             doNotOptimize(query_pos);
             doNotOptimize(target_pos);
+            //            std::cout << marker << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" <<
+            //            target_pos
+            //                      << "\n";
+            if (kind == seed_kind::B1B2)
+                nmatch00++;
+            else
+                nmatch010++;
         };
 
         query_base::query(seq_base::get_window().forward(), onmatch);
+        if (_first_kmer) {
+            _first_kmer = false;
+            marker      = "R0";
+            query_base::query_run_end(seq_base::get_window().reverse(), onmatch);
+        }
+
+        marker = "R ";
+        query_base::query(seq_base::get_window().reverse(), onmatch);
+
+        nkmer++;
     }
+
     void on_run_end()
     {
-        return;
-
         const char* kinds_str[] = {"00 ", "000", "0M0", "0I0", "0D0"};
-
-        auto onmatch = [&](size_t target_pos, seed_kind kind, size_t offset) {
+        std::string marker      = "F0";
+        auto        onmatch     = [&](size_t target_pos, seed_kind kind, size_t offset = 0) {
             size_t query_pos = seq_base::get_pos() + offset;
-            //            if (target_pos >= query_pos) return;
-            //            std::cout << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" << target_pos
-            //            << " (re)\n";
+            // if (query_pos >= target_pos) return;
+            //            std::cout << marker << kinds_str[static_cast<size_t>(kind)] << "\t" << query_pos << "\t" <<
+            //            target_pos
+            //                      << std::endl;
             doNotOptimize(query_pos);
             doNotOptimize(target_pos);
+            if (kind == seed_kind::B1B2)
+                nmatch00++;
+            else
+                nmatch010++;
         };
 
         query_base::query_run_end(seq_base::get_window().forward(), onmatch);
     }
-    bool on_chrom() { return true; }
+    bool on_chrom()
+    {
+        _first_kmer = true;
+        return true;
+    }
+
+    uint64_t nkmer     = 0;
+    uint64_t nmatch010 = 0;
+    uint64_t nmatch00  = 0;
+
+  private:
+    bool _first_kmer;
 };
 
 void
@@ -742,7 +783,27 @@ query(const file_list& fq_in, const seedlib_index<seed_model<>>& idx)
     seq_query query_instance{idx};
     for (const auto& fastx : fq_in)
         query_instance.read_fastx(fastx);
+
+    std::cout << "nkmers: " << query_instance.nkmer << "\n"
+              << "n00: " << query_instance.nmatch00 << "\n"
+              << "n010: " << query_instance.nmatch010 << "\n";
 }
+
+struct Timer
+{
+    Timer()
+      : _start(std::chrono::high_resolution_clock::now())
+    {}
+
+    std::chrono::milliseconds::duration::rep get_ms() const
+    {
+        auto stop = std::chrono::high_resolution_clock::now();
+        auto dur  = stop - _start;
+        return std::chrono::duration_cast<std::chrono::milliseconds>(dur).count();
+    }
+
+    std::chrono::high_resolution_clock::time_point _start;
+};
 
 void
 build_index(const file_list& fq_in, const std::string& index_name)
@@ -753,8 +814,11 @@ build_index(const file_list& fq_in, const std::string& index_name)
     sys::check_ret(setrlimit(RLIMIT_NOFILE, &limits), "setrlimit");
 
     {
-        seedlib_index<> index(fq_in, index_name, 5, 3.0);
+        Timer           t;
+        seedlib_index<> index(fq_in, index_name, 5, 0.0);
         sdsl::store_to_file(index, index_name);
+        auto dt = t.get_ms();
+        std::cout << "index construction time: " << dt << "ms \n";
     }
 
     seedlib_index<> index{};
@@ -765,7 +829,12 @@ build_index(const file_list& fq_in, const std::string& index_name)
     print_memreport(report);
 
     // index.query(fq_in);
-    query(fq_in, index);
+    {
+        Timer t;
+        query(fq_in, index);
+        auto dt = t.get_ms();
+        std::cout << "query time: " << dt << "ms \n";
+    }
 }
 
 } // namespace seedlib

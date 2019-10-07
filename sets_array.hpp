@@ -222,6 +222,7 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
   private:
     void build_rev()
     {
+        if (unlikely(this->_lkt.empty())) return;
         _rev.width(gatbl::bits::ilog2(this->_lkt.size()));
         _rev.resize((details::back(this->_lkt) >> rev_approx_bits) + 1);
 
