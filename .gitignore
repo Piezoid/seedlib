@@ -1,6 +1,27 @@
 # This file is used to ignore files which are generated
 # ----------------------------------------------------------------------------
 
+
+
+### CMake ###
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+build.ninja
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CMakeDoxyfile.in
+CMakeDoxygenDefaults.cmake
+_deps
+
+
 *~
 *.autosave
 *.a

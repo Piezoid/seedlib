@@ -13,7 +13,7 @@
 #include <gatbl/utils/nop_functor.hpp>
 #include <gatbl/utils/iterator_pair.hpp>
 
-#include "common.hpp"
+#include "memreport.hpp"
 
 namespace seedlib {
 
@@ -34,7 +34,7 @@ iterator_at(const int_vector<width>& vec, typename int_vector<width>::size_type 
 
 template<typename R>
 auto
-iterator_at(const R& r, size_t idx) -> decltype(std::begin(r))
+iterator_at(const std::vector<R>& r, size_t idx) -> decltype(std::begin(r))
 {
     assert(idx < size(r), "idx out of range");
     auto it = begin(r);
@@ -50,9 +50,9 @@ value_at(const int_vector<width>& vec, typename int_vector<width>::size_type idx
     return *iterator_at(vec, idx);
 }
 
-template<typename R>
+template<typename T>
 auto
-value_at(const R& r, size_t idx) -> decltype(r[idx])
+value_at(const std::vector<T>& r, size_t idx) -> decltype(r[idx])
 {
     return r[idx];
 }
@@ -64,9 +64,9 @@ back(const int_vector<width>& vec)
     return value_at(vec, vec.size() - 1);
 }
 
-template<typename R>
+template<typename T>
 auto
-back(const R& r) -> decltype(r.back())
+back(const T& r) -> decltype(r.back())
 {
     return r.back();
 }
@@ -82,7 +82,9 @@ copy_sorted_range(std::vector<T>& dst, const R& src)
 
 using value_type = int_vector<0>::value_type;
 using size_type  = int_vector<0>::size_type;
-template<typename R> void copy_sorted_range(sdsl::int_vector<0>& dst, const R& src)
+template<typename R>
+void
+copy_sorted_range(sdsl::int_vector<0>& dst, const R& src)
 {
     using gatbl::size;
     assert(std::is_sorted(src.begin(), src.end()), "input is not sorted");
@@ -91,7 +93,8 @@ template<typename R> void copy_sorted_range(sdsl::int_vector<0>& dst, const R& s
     std::copy(src.begin(), src.end(), dst.begin());
 }
 
-void copy_sorted_range(sdsl::int_vector<0>& dst, sdsl::int_vector<0>&& src)
+void
+copy_sorted_range(sdsl::int_vector<0>& dst, sdsl::int_vector<0>&& src)
 {
     assert(std::is_sorted(src.begin(), src.end()), "input is not sorted");
     uint8_t width = gatbl::bits::ilog2p1(back(src));
@@ -133,11 +136,10 @@ template<typename lkt_arr_t = sdsl::int_vector<>> struct interval_index
         return {key > 0 ? details::value_at(_lkt, key - 1) : 0, details::value_at(_lkt, key)};
     }
 
-    value_type get_key(size_type idx) const
+    value_type get_key(size_type idx, size_type low = 0) const
     {
         assume(idx < details::back(_lkt), "idx out of bound, should be %lu <= size=%lu", idx, details::back(_lkt));
 
-        size_type low  = 0;
         size_type high = _lkt.size();
         while (high - low > 0) {
             size_type midpoint = low + (size_type(high - low) >> 1u);
@@ -189,7 +191,7 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         build_rev();
     }
 
-    value_type get_key(size_type idx) const
+    value_type get_key(size_type idx, size_type low = 0) const
     {
         assert(idx < details::back(this->_lkt),
                "idx out of bound, should be %lu <= size=%lu",
@@ -197,8 +199,8 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
                details::back(this->_lkt));
 
         size_type shifted = idx >> rev_approx_bits;
-        size_type low     = shifted > 0 ? _rev[shifted - 1] : 0;
-        size_type high    = _rev[shifted];
+        if (low == 0 && shifted > 0) low = details::value_at(_rev, shifted - 1);
+        size_type high = details::value_at(_rev, shifted);
         while (high - low > 0) {
             size_type midpoint = low + (size_type(high - low) >> 1u);
             if (idx < details::value_at(this->_lkt, midpoint))
