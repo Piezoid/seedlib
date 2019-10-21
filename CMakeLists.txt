@@ -17,17 +17,17 @@ set(src_dir "${CMAKE_CURRENT_SOURCE_DIR}/src")
 include(GNUInstallDirs)
 add_subdirectory(thirdparty)
 
-add_library(${PROJECT_NAME})
+add_library(${PROJECT_NAME} STATIC "src/seedlib.cpp")
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 14)
-target_sources(${PROJECT_NAME} PRIVATE "src/seedlib.cpp")
 target_link_libraries(${PROJECT_NAME} PRIVATE gatbl sdsl)
 target_include_directories(${PROJECT_NAME}
     PUBLIC
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         $<BUILD_INTERFACE:${include_dir}>
     PRIVATE
         ${src_dir}
 )
+install(DIRECTORY ${include_dir}/seedlib DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 set(BINARY_TARGET "${PROJECT_NAME}-bin")
 add_executable(${BINARY_TARGET} "${src_dir}/main.cpp")
@@ -42,3 +42,8 @@ target_include_directories(${BINARY_TARGET}
 )
 target_link_libraries(${BINARY_TARGET} PRIVATE ${PROJECT_NAME} gatbl clipp)
 
+
+install(TARGETS seedlib seedlib-bin
+	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+	)

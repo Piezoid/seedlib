@@ -3,7 +3,7 @@
 #include <iostream>
 #include <clipp.h>
 
-#include "seedlib.hpp"
+#include "seedlib/seedlib.hpp"
 
 struct Timer
 {
@@ -95,15 +95,16 @@ main(int argc, char* argv[])
          option("--b2_len", "-2") & value("b2_len", config.b2) % "b2 length (int [0-8], =0 use b1)",
          option("--b3_len", "-3") & value("b3_len", config.b3) % "b3 length (int [0-8], =0 use b1)",
          option("--complexity", "-c") & value("2nuc entropy", config.min_entropy) % "min entropy in bits (float [0-4])",
-         option("--downsample", "-d") & value("downsample", downsampling) % "inverse of fraction of positions retained (float [0-1])",
+         option("--downsample", "-d")
+           & value("downsample", downsampling) % "inverse of fraction of positions retained (float [0-1])",
          option("--b1vsb1b2", "-r")
            & value("b1vsb1b2", config.b1_vs_b1b2_drop) % "0 to downsample by b1, 1 to downsample by b1b2 (float [0-1])",
          inputsArgs);
 
-    auto statCmd = command("stat").set(selected, mode::stat);
+    auto statCmd  = command("stat").set(selected, mode::stat);
     auto statMode = (statCmd, indexArg);
 
-    auto findCmd = command("query").set(selected, mode::query);
+    auto findCmd  = command("query").set(selected, mode::query);
     auto findMode = (findCmd, indexArg, values("infile", config.inputs));
 
     auto cli = (indexMode | statMode | findMode | command("help").set(selected, mode::help));

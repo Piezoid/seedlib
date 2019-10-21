@@ -13,7 +13,7 @@
 #include <gatbl/utils/nop_functor.hpp>
 #include <gatbl/utils/iterator_pair.hpp>
 
-#include "memreport.hpp"
+#include "seedlib/memreport.hpp"
 
 namespace seedlib {
 

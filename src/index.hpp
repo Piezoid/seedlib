@@ -2,7 +2,7 @@
 #define INDEX_HPP
 
 #include "sets_array.hpp"
-#include "seed_types.hpp"
+#include "seedlib/seed_types.hpp"
 
 #include <gatbl/fastx2kmer.hpp>
 

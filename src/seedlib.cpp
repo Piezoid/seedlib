@@ -2,7 +2,7 @@
 #include <iostream>
 
 #include "index.hpp"
-#include "seedlib.hpp"
+#include "seedlib/seedlib.hpp"
 
 #include <gatbl/fastx2kmer.hpp>
 #include <gatbl/utils/pimpl.tpp>
