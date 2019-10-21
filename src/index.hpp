@@ -9,6 +9,7 @@
 namespace seedlib {
 
 using gatbl::kmer_model;
+using gatbl::ksize_t;
 using gatbl::prefix_kextractor;
 using gatbl::suffix_kextractor;
 
@@ -30,10 +31,18 @@ template<typename seed_types> struct seed_model : public seed_types
       : b1_sz(b1)
       , b2_sz(b2 ? b2 : b1)
       , b3_sz(b3 ? b3 : b1)
-    {}
-
-  public:
-    using type_traits = seed_types;
+    {
+        check_width<b1_t>("b1", b1_sz);
+        check_width<b2_t>("b2", b2_sz);
+        check_width<b3_t>("b3", b3_sz);
+        check_width<b2ins_t>("b2+1", b2ins_size());
+        check_width<b2del_t>("b2-1", b2del_size());
+        check_width<b2b3_t>("b2+b3", b2b3_size());
+        check_width<b2insb3_t>("b2+b3+1", b2insb3_size());
+        check_width<b2delb3_t>("b2+b3-1", b2delb3_size());
+        check_width<kmer_t>("b1+b2+b3", kmer_size());
+        check_width<kmerins_t>("b1+b2+b3+1", kmer_size());
+    }
 
     kmer_model<b1_t> b1_size() const { return b1_sz; }
     kmer_model<b2_t> b2_size() const { return b2_sz; }
@@ -65,6 +74,19 @@ template<typename seed_types> struct seed_model : public seed_types
     suffix_kextractor<b3_t, b2insb3_t>      b2insb3_to_b3() const { return {b3_sz}; }
 
   private:
+    template<typename T> void check_width(const char* var_name, size_t k)
+    {
+        static constexpr size_t max_width = gatbl::bits::bitwidth<T>() / 2;
+        if (unlikely(k > max_width)) throw_invalid_size(var_name, max_width, k);
+    }
+
+    void noinline_fun throw_invalid_size(const char* var_name, size_t max_width, size_t k)
+    {
+        std::stringstream msg(var_name);
+        msg << " = " << k << " larger than max value (" << max_width << ")";
+        throw std::invalid_argument(msg.str());
+    }
+
     kmer_model<b1_t> b1_sz;
     kmer_model<b2_t> b2_sz;
     kmer_model<b3_t> b3_sz;
@@ -173,7 +195,7 @@ template<typename T> struct partition
 };
 
 static inline hot_fun bool
-test_1indel_match(uint64_t x, uint64_t y, gatbl::ksize_t lena)
+test_1indel_match(uint64_t x, uint64_t y, ksize_t lena)
 {
     assume(lena >= 1, "kmer to short");
     uint64_t mask = uint64_t(3u) << 2u * (lena - 1); // Two high bits on the first char of x
@@ -212,7 +234,6 @@ template<typename seed_model> class seedlib_index : public seed_model
     using typename seed_types::b3_t;
     using typename seed_types::kmer_t;
     using typename seed_types::kmerins_t;
-    using ksize_t           = gatbl::ksize_t;
     using positioned_b2b3_t = gatbl::positioned<b2b3_t>;
 
     using chrom_starts_t = reversible_interval_index<std::vector<size_t>, 10>;
