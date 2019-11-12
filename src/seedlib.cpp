@@ -1,5 +1,6 @@
 #include <string>
 #include <iostream>
+#include <fstream>
 
 #include "index.hpp"
 #include "seedlib/seedlib.hpp"
@@ -18,13 +19,22 @@ basename_str(const std::string& filename)
     return filename.substr(lastslash != std::string::npos ? lastslash + 1 : 0);
 }
 
-index::index(const std::string& filename) { sdsl::load_from_file(*pimpl, filename); }
+index::index(const std::string& filename)
+{
+    using gatbl::read;
+    std::ifstream in(filename);
+    read(in, *pimpl);
+}
 
 index::index(const index_config& config)
 {
     bool ok = ::access(config.output.c_str(), F_OK) != -1;
 
-    if (ok) { ok = sdsl::load_from_file(*pimpl, config.output); }
+    if (ok) {
+        using gatbl::read;
+        std::ifstream in(config.output);
+        read(in, *pimpl);
+    }
 
     if (ok) {
         std::cerr << "Loaded index " << config.output << std::endl;
@@ -53,7 +63,11 @@ index::index(const index_config& config)
                   b1b2_ratio};
 
         std::cerr << "Saving index " << config.output << std::endl;
-        sdsl::store_to_file(*pimpl, config.output);
+        {
+            using gatbl::write;
+            std::ofstream out(config.output);
+            write(out, *pimpl);
+        }
     }
 }
 

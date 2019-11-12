@@ -1,119 +1,62 @@
 #ifndef RRR_MULTIMAP_HPP
 #define RRR_MULTIMAP_HPP
 
-#ifndef NDEBUG
-#    define SDSL_DEBUG 1
-#endif
-
 #include <algorithm>
-
-#include <sdsl/int_vector.hpp>
 
 #include <gatbl/sys/bits.hpp>
 #include <gatbl/utils/nop_functor.hpp>
-#include <gatbl/utils/iterator_pair.hpp>
+#include <gatbl/sys/serialization.hpp>
+#include <gatbl/ds/int_vector.hpp>
 
 #include "seedlib/memreport.hpp"
 
 namespace seedlib {
 
+size_t
+size_in_bytes(const gatbl::int_vector<>& vec)
+{
+    return vec.size_in_bytes();
+}
+
+template<typename T>
+size_t
+size_in_bytes(const std::vector<T>& vec)
+{
+    return sizeof(T) * vec.size();
+}
+
 namespace details {
 
-using sdsl::int_vector;
-
-using gatbl::size;
-using std::advance;
-using std::begin;
-
-template<uint8_t width>
-typename int_vector<width>::const_iterator
-iterator_at(const int_vector<width>& vec, typename int_vector<width>::size_type idx)
+template<typename T> struct _make_int_vector
 {
-    return typename int_vector<width>::const_iterator(&vec, idx * vec.width());
-}
+    static T build(typename T::size_type size, uint_fast8_t width) { return T(size); }
+};
 
-template<typename R>
-auto
-iterator_at(const std::vector<R>& r, size_t idx) -> decltype(std::begin(r))
+template<> struct _make_int_vector<gatbl::int_vector<>>
 {
-    assert(idx < size(r), "idx out of range");
-    auto it = begin(r);
-    advance(it, idx);
-    return it;
-}
-
-// Iterator access is faster than sdsl::get_int for some reason...
-template<uint8_t width>
-typename int_vector<width>::value_type
-value_at(const int_vector<width>& vec, typename int_vector<width>::size_type idx)
-{
-    return *iterator_at(vec, idx);
-}
-
-template<typename T>
-auto
-value_at(const std::vector<T>& r, size_t idx) -> decltype(r[idx])
-{
-    return r[idx];
-}
-
-template<uint8_t width>
-typename int_vector<width>::value_type
-back(const int_vector<width>& vec)
-{
-    return value_at(vec, vec.size() - 1);
-}
-
-template<typename T>
-auto
-back(const T& r) -> decltype(r.back())
-{
-    return r.back();
-}
-
-template<typename R, typename T>
-void
-copy_sorted_range(std::vector<T>& dst, const R& src)
-{
-    assert(std::is_sorted(src.begin(), src.end()), "input is not sorted");
-    dst.resize(size(src));
-    std::copy(src.begin(), src.end(), dst.begin());
-}
-
-using value_type = int_vector<0>::value_type;
-using size_type  = int_vector<0>::size_type;
-template<typename R>
-void
-copy_sorted_range(sdsl::int_vector<0>& dst, const R& src)
-{
-    using gatbl::size;
-    assert(std::is_sorted(src.begin(), src.end()), "input is not sorted");
-    dst.width(gatbl::bits::ilog2p1(back(src)));
-    dst.resize(size(src));
-    std::copy(src.begin(), src.end(), dst.begin());
-}
-
-void
-copy_sorted_range(sdsl::int_vector<0>& dst, sdsl::int_vector<0>&& src)
-{
-    assert(std::is_sorted(src.begin(), src.end()), "input is not sorted");
-    uint8_t width = gatbl::bits::ilog2p1(back(src));
-    if (width == src.width()) {
-        dst = std::move(src);
-    } else { // Compress the bit vector to minimal width
-        dst.width(width);
-        dst.resize(src.size());
-        std::copy(src.begin(), src.end(), dst.begin());
+    static gatbl::int_vector<> build(typename gatbl::int_vector<>::size_type size, uint_fast8_t width)
+    {
+        auto res = gatbl::int_vector<>(size, width);
+        return res;
     }
-}
+};
 
-}
-
-template<typename lkt_arr_t = sdsl::int_vector<>> struct interval_index
+template<typename T>
+T
+make_int_vector(typename T::size_type size, uint_fast8_t width)
 {
-    using int_vector = sdsl::int_vector<>;
-    using size_type  = typename int_vector::size_type;
-    using value_type = typename int_vector::value_type;
+    return _make_int_vector<T>::build(size, width);
+}
+
+}
+
+/// Array of contiguous intervals
+/// Provide binary search for interval indice from a value in the interval range
+template<typename LktArrT = int /* BULLSHIT */> struct interval_index
+{
+    using lkt_arr_t = LktArrT;
+    using key_type  = typename lkt_arr_t::size_type;  // Interval indices
+    using idx_type  = typename lkt_arr_t::value_type; // Interval coordinates (positions in the indexed data structure)
 
     interval_index()                 = default;
     interval_index(interval_index&&) = default;
@@ -121,29 +64,41 @@ template<typename lkt_arr_t = sdsl::int_vector<>> struct interval_index
     interval_index(const interval_index&)       = delete;
     interval_index& operator=(const interval_index&) = delete;
 
-    template<typename R> interval_index(R&& lkt) { details::copy_sorted_range(_lkt, std::forward<R>(lkt)); }
-
-    size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+    template<typename R>
+    interval_index(R&& lkt)
+      : _lkt(std::forward<R>(lkt))
     {
-        return sdsl::serialize(_lkt, out, v, "binary_ranges");
+        assert(std::is_sorted(_lkt.begin(), _lkt.end()), "input is not sorted");
     }
 
-    void load(std::istream& in) { sdsl::load(_lkt, in); }
+    template<typename O> friend O& write(O& out, const interval_index& ii)
+    {
+        using gatbl::write;
+        write(out, ii._lkt);
+        return out;
+    }
 
-    std::pair<size_type, size_type> get_bounds(size_type key) const
+    template<typename I> friend I& read(I& in, interval_index& ii)
+    {
+        using gatbl::read;
+        read(in, ii._lkt);
+        return in;
+    }
+
+    std::pair<idx_type, idx_type> get_bounds(key_type key) const
     {
         assert(key < _lkt.size(), "key out of range");
-        return {key > 0 ? details::value_at(_lkt, key - 1) : 0, details::value_at(_lkt, key)};
+        return {key > 0 ? _lkt[key - 1] : 0, _lkt[key]};
     }
 
-    value_type get_key(size_type idx, size_type low = 0) const
+    key_type get_key(idx_type idx, key_type low = 0) const
     {
-        assume(idx < details::back(_lkt), "idx out of bound, should be %lu <= size=%lu", idx, details::back(_lkt));
+        assume(idx < _lkt.back(), "idx out of bound, should be %lu <= size=%lu", idx, _lkt.back());
 
-        size_type high = _lkt.size();
+        key_type high = _lkt.size();
         while (high - low > 0) {
-            size_type midpoint = low + (size_type(high - low) >> 1u);
-            if (idx < details::value_at(_lkt, midpoint))
+            key_type midpoint = low + (key_type(high - low) >> 1u);
+            if (idx < _lkt[midpoint])
                 high = midpoint;
             else {
                 low = midpoint + 1;
@@ -155,22 +110,24 @@ template<typename lkt_arr_t = sdsl::int_vector<>> struct interval_index
 
     void stat(memreport_t& report, const std::string& prefix = "") const
     {
-        report[prefix + "::forward"] += sdsl::size_in_bytes(_lkt);
+        report[prefix + "::forward"] += size_in_bytes(_lkt);
     }
 
   protected:
     lkt_arr_t _lkt = lkt_arr_t(); // Key to ranges high bound (exclusive)
 };
 
-template<typename lkt_arr_t = sdsl::int_vector<>, uint8_t rev_approx_bits = 5>
+/// Same as interval_index, but accelerates the binary search by storing intervals indices every 2^rev_approx_bits
+/// positions
+template<typename lkt_arr_t      = int /* BULLSHIT for checking that it is never instantiated like that */,
+         uint8_t rev_approx_bits = 5>
 class reversible_interval_index : public interval_index<lkt_arr_t>
 {
     using base = interval_index<lkt_arr_t>;
 
   public:
-    using int_vector = sdsl::int_vector<>;
-    using size_type  = typename int_vector::size_type;
-    using value_type = typename int_vector::value_type;
+    using typename base::idx_type;
+    using typename base::key_type;
 
     reversible_interval_index()                            = default;
     reversible_interval_index(reversible_interval_index&&) = default;
@@ -185,25 +142,24 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         build_rev();
     }
 
-    void load(std::istream& in)
+    template<typename I> friend I& read(I& in, reversible_interval_index& rii)
     {
-        base::load(in);
-        build_rev();
+        using gatbl::read;
+        read(in, static_cast<base&>(rii));
+        rii.build_rev();
+        return in;
     }
 
-    value_type get_key(size_type idx, size_type low = 0) const
+    key_type get_key(idx_type idx, key_type low = 0) const
     {
-        assert(idx < details::back(this->_lkt),
-               "idx out of bound, should be %lu <= size=%lu",
-               idx,
-               details::back(this->_lkt));
+        assert(idx < this->_lkt.back(), "idx out of bound, should be %lu <= size=%lu", idx, this->_lkt.back());
 
-        size_type shifted = idx >> rev_approx_bits;
-        if (low == 0 && shifted > 0) low = details::value_at(_rev, shifted - 1);
-        size_type high = details::value_at(_rev, shifted);
+        idx_type shifted = idx >> rev_approx_bits;
+        if (low == 0 && shifted > 0) low = _rev[shifted - 1];
+        key_type high = _rev[shifted];
         while (high - low > 0) {
-            size_type midpoint = low + (size_type(high - low) >> 1u);
-            if (idx < details::value_at(this->_lkt, midpoint))
+            key_type midpoint = low + (key_type(high - low) >> 1u);
+            if (idx < this->_lkt[midpoint])
                 high = midpoint;
             else {
                 low = midpoint + 1;
@@ -225,13 +181,13 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
     void build_rev()
     {
         if (unlikely(this->_lkt.empty())) return;
-        _rev.width(gatbl::bits::ilog2(this->_lkt.size()));
-        _rev.resize((details::back(this->_lkt) >> rev_approx_bits) + 1);
+        _rev = details::make_int_vector<decltype(_rev)>((this->_lkt.back() >> rev_approx_bits) + 1,
+                                                        gatbl::bits::ilog2(this->_lkt.size()));
 
-        auto       it      = this->_lkt.begin();
-        auto       last    = this->_lkt.end();
-        value_type key     = 0;
-        size_type  max_idx = 0;
+        auto     it      = this->_lkt.begin();
+        auto     last    = this->_lkt.end();
+        key_type key     = 0;
+        idx_type max_idx = 0;
         for (auto max_key_in_range : _rev) {
             max_idx += 1u << rev_approx_bits;
             assert(it != last, "Went above max idx twice");
@@ -246,11 +202,11 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         }
     }
 
-    int_vector _rev = int_vector(); // Precomputed ranges for binary search
+    gatbl::int_vector<> _rev = {}; // Precomputed ranges for binary search
 };
 
 /// A multimap from (almost dense) integer keys to sets of integer values
-template<typename K, typename V, typename vec_t = sdsl::int_vector<>, typename index_t = interval_index<>>
+template<typename K, typename V, typename vec_t = gatbl::int_vector<>, typename index_t = interval_index<>>
 struct sets_array
 {
     using key_t     = K;
@@ -278,14 +234,9 @@ struct sets_array
     {
         if (size(records) == 0) return;
 
-        using tmpdelta_t = uint32_t;
-        sdsl::int_vector<> values{};
-        values.width(gatbl::bits::ilog2p1(image_size));
-        values.resize(size(records));
-
-        sdsl::int_vector<> key_to_high_idx{};
-        key_to_high_idx.width(gatbl::bits::ilog2p1(size(records)));
-        key_to_high_idx.resize(domain_size);
+        auto values = details::make_int_vector<gatbl::int_vector<>>(records.size(), gatbl::bits::ilog2p1(image_size));
+        auto key_to_high_idx
+          = details::make_int_vector<typename index_t::lkt_arr_t>(domain_size, gatbl::bits::ilog2p1(size(records)));
 
         key_t     prev_key = 0; // Detect transition from one set to the next
         size_type slot_idx = 0; // Current slot
@@ -304,7 +255,7 @@ struct sets_array
                     } else {
                         break;
                     }
-                };
+                }
             }
             assume(slot_idx < size(records), "slot_idx out of bounds");
 
@@ -351,21 +302,20 @@ struct sets_array
 #endif
     }
 
-    size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+    template<typename O> friend O& write(O& out, const sets_array& setarr)
     {
-        sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-        size_type                  written_bytes = 0;
-        written_bytes += _values.serialize(out, child, "values");
-        if (_values.size() != 0) { written_bytes += _index.serialize(out, child, "index"); }
-        sdsl::structure_tree::add_size(child, written_bytes);
-        return written_bytes;
+        using gatbl::write;
+        write(out, setarr._values);
+        if (setarr._values.size() != 0) { write(out, setarr._index); }
+        return out;
     }
 
-    void load(std::istream& in)
+    template<typename I> friend I& read(I& in, sets_array& setarr)
     {
-
-        _values.load(in);
-        if (_values.size() != 0) { _index.load(in); }
+        using gatbl::read;
+        read(in, setarr._values);
+        if (setarr._values.size() != 0) { read(in, setarr._index); }
+        return in;
     }
 
     void stat(memreport_t& report, const std::string& prefix = "") const
@@ -377,13 +327,18 @@ struct sets_array
     range operator[](key_t key) const
     {
         auto range = _index.get_bounds(key);
-        return {details::iterator_at(_values, range.first), details::iterator_at(_values, range.second)};
+        auto first = _values.begin();
+        auto last  = first;
+        std::advance(first, range.first);
+        std::advance(last, range.second);
+        return {first, last};
     }
 
     template<typename F> hot_fun void iterate_set(key_t key, F&& f) const
     {
         auto range = _index.get_bounds(key);
-        auto it    = details::iterator_at(_values, range.first);
+        auto it    = _values.begin();
+        std::advance(it, range.first);
         for (size_t i = range.second - range.first; i-- > 0; it++) {
             if (not f(*it)) break;
         }
@@ -403,13 +358,13 @@ struct sets_array
     {
         assume(*this, "query on empty multimap");
         assume(idx < _values.size(), "idx out of bound, should be %lu <= size=%lu", idx, _values.size());
-        return details::value_at(_values, idx);
+        return _values[idx];
     }
 
     std::pair<key_t, value_t> get_key_value(size_type idx) const
     {
         key_t key = get_key(idx);
-        return {key, details::value_at(_values, idx)};
+        return {key, _values[idx]};
     }
 
   private:

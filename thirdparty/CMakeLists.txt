@@ -1,21 +1,3 @@
-find_library(SDSL_LIBRARY NAMES sdsl sdsl-lite)
-if(NOT SDSL_LIBRARY)
-    FILE(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/sdsl-lite" sdsl_project_dir)
-    if(NOT EXISTS "${sdsl_project_dir}/CMakeLists.txt")
-        execute_process(COMMAND git submodule update --init -- ${sdsl_project_dir}
-                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    endif()
-    set(CMAKE_POLICY_DEFAULT_CMP0048 NEW)
-    add_subdirectory(${sdsl_project_dir} EXCLUDE_FROM_ALL)
-
-    if(${CMAKE_VERSION} VERSION_GREATER "3.12.99")
-        install(TARGETS sdsl)
-    else()
-        install(SCRIPT "${sdsl_BINARY_DIR}/lib/cmake_install.cmake")
-    endif()
-    install(SCRIPT "${sdsl_BINARY_DIR}/include/cmake_install.cmake")
-endif()
-
 find_library(GATBL_LIBRARY NAMES gatbl gatb-lite)
 if(NOT GATBL_LIBRARY)
     FILE(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/gatb-lite" gatbl_project_dir)

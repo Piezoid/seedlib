@@ -102,7 +102,7 @@ template<typename T> struct partition
       , _buffer_ptr(_arr.get())
       , _buffer_end(_buffer_ptr + page_size)
     {
-        gatbl::sys::check_ret(::unlink(filename.c_str()), "unlink");
+        gatbl::check_ret(::unlink(filename.c_str()), "unlink");
     }
 
     partition(partition&&) noexcept = default;
@@ -126,8 +126,8 @@ template<typename T> struct partition
                 assert(bits::load_int_vb(_buffer_ptr, p, check_delta) == p && check_delta == delta,
                        "VB coding inconsistency");
 
-                *reinterpret_cast<T*>(p) = record.data;
-                _buffer_ptr              = p + sizeof(T);
+                memcpy(p, &record.data, sizeof(T));
+                _buffer_ptr = p + sizeof(T);
                 break;
             } else {
                 dump();
@@ -169,7 +169,8 @@ template<typename T> struct partition
             pos += delta;
 
             assume(ptr + sizeof(T) <= last, "Not enough remaining space for block pair");
-            T data = *reinterpret_cast<const T*>(ptr);
+            T data;
+            memcpy(&data, ptr, sizeof(T));
             ptr += sizeof(T);
 
             f(gatbl::positioned<T>{data, pos});
@@ -182,16 +183,16 @@ template<typename T> struct partition
         uint8_t* const buf_start = _arr.get();
         assume(_buffer_ptr >= buf_start && _buffer_ptr <= _buffer_end, "Buffer pointer out of bound");
 
-        _fd.write(gatbl::span<uint8_t>(buf_start, _buffer_ptr));
+        gatbl::write(_fd, gatbl::span<uint8_t>(buf_start, _buffer_ptr));
         _buffer_ptr = buf_start;
     }
 
-    gatbl::sys::file_descriptor _fd;
-    std::unique_ptr<uint8_t[]>  _arr;
-    uint8_t*                    _buffer_ptr;
-    uint8_t* const              _buffer_end;
-    size_t                      _last_pos = 0;
-    size_t                      _nitems   = 0;
+    gatbl::file_descriptor     _fd;
+    std::unique_ptr<uint8_t[]> _arr;
+    uint8_t*                   _buffer_ptr;
+    uint8_t* const             _buffer_end;
+    size_t                     _last_pos = 0;
+    size_t                     _nitems   = 0;
 };
 
 static inline hot_fun bool
@@ -241,10 +242,9 @@ template<typename seed_model> class seedlib_index : public seed_model
   public:
     struct part_index
     {
-        // using vec_t      = typename sdsl::dac_vector_dp<sdsl::rrr_vector<15u>>;
-        using vec_t = sdsl::int_vector<>;
-        sets_array<b2_t, size_t, vec_t, reversible_interval_index<std::vector<uint32_t>>> b2_to_pos{};
-        sets_array<b3_t, size_t, vec_t, interval_index<std::vector<uint32_t>>>            b3_to_b2{};
+        using vec_t = gatbl::int_vector<>;
+        sets_array<b2_t, size_t, vec_t, reversible_interval_index<gatbl::int_vector<>, 2>> b2_to_pos{};
+        sets_array<b3_t, size_t, vec_t, interval_index<gatbl::int_vector<>>>               b3_to_b2{};
         using size_type = typename vec_t::size_type;
         size_type nkmers{};
 
@@ -327,22 +327,22 @@ template<typename seed_model> class seedlib_index : public seed_model
             b3_to_b2  = {};
         }
 
-        size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, const std::string& name) const
+        template<typename O> friend O& write(O& out, const part_index& pi)
         {
-            sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-            size_type                  written_bytes = 0;
-            written_bytes += sdsl::write_member(nkmers, out, child, "nkmers");
-            written_bytes += b2_to_pos.serialize(out, child, "b2_to_pos");
-            written_bytes += b3_to_b2.serialize(out, child, "b3_to_b2");
-            sdsl::structure_tree::add_size(child, written_bytes);
-            return written_bytes;
+            using gatbl::write;
+            write(out, pi.nkmers);
+            write(out, pi.b2_to_pos);
+            write(out, pi.b3_to_b2);
+            return out;
         }
 
-        void load(std::istream& in)
+        template<typename I> friend I& read(I& in, part_index& pi)
         {
-            sdsl::read_member(nkmers, in);
-            b2_to_pos.load(in);
-            b3_to_b2.load(in);
+            using gatbl::read;
+            read(in, pi.nkmers);
+            read(in, pi.b2_to_pos);
+            read(in, pi.b3_to_b2);
+            return in;
         }
 
         void stat(memreport_t& report, const std::string& prefix = "") const
@@ -519,30 +519,29 @@ template<typename seed_model> class seedlib_index : public seed_model
         }
     }
 
-    size_type serialize(std::ostream& out, sdsl::structure_tree_node* v, std::string name) const
+    template<typename O> friend O& write(O& out, const seedlib_index& index)
     {
-        sdsl::structure_tree_node* child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-        size_type                  written_bytes = 0;
-        written_bytes += sdsl::write_member(static_cast<const seed_model&>(*this), out, child, "seed_model");
-        written_bytes += sdsl::write_member(_entropy_thresh, out, child, "entropy_thresh");
-        written_bytes += _seq_index.serialize(out, child, "seq_index");
-        auto nparts = npartitions();
-        for (auto& part : _partitions) {
-            written_bytes += part.serialize(out, child, "b2_to_pos");
+        using gatbl::write;
+        write(out, static_cast<const seed_model&>(index));
+        write(out, index._entropy_thresh);
+        write(out, index._seq_index);
+        for (const auto& part : index._partitions) {
+            write(out, part);
         }
-        sdsl::structure_tree::add_size(child, written_bytes);
-        return written_bytes;
+        return out;
     }
 
-    void load(std::istream& in)
+    template<typename I> friend I& read(I& in, seedlib_index& index)
     {
-        sdsl::read_member(static_cast<seed_model&>(*this), in);
-        sdsl::read_member(_entropy_thresh, in);
-        _seq_index.load(in);
-        _partitions = decltype(_partitions)(npartitions());
-        for (auto& part : _partitions) {
-            part.load(in);
+        using gatbl::read;
+        read(in, static_cast<seed_model&>(index));
+        read(in, index._entropy_thresh);
+        read(in, index._seq_index);
+        index._partitions = decltype(index._partitions)(index.npartitions());
+        for (auto& part : index._partitions) {
+            read(in, part);
         }
+        return in;
     }
 
     size_t npartitions() const { return seed_model::b1_size().cardinality(); }

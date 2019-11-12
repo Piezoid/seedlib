@@ -19,7 +19,7 @@ add_subdirectory(thirdparty)
 
 add_library(${PROJECT_NAME} STATIC "src/seedlib.cpp")
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 14)
-target_link_libraries(${PROJECT_NAME} PRIVATE gatbl sdsl)
+target_link_libraries(${PROJECT_NAME} PRIVATE gatbl)
 target_include_directories(${PROJECT_NAME}
     PUBLIC
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
