@@ -243,8 +243,8 @@ template<typename seed_model> class seedlib_index : public seed_model
     struct part_index
     {
         using vec_t = gatbl::int_vector<>;
-        sets_array<b2_t, size_t, vec_t, reversible_interval_index<gatbl::int_vector<>, 2>> b2_to_pos{};
-        sets_array<b3_t, size_t, vec_t, interval_index<gatbl::int_vector<>>>               b3_to_b2{};
+        sets_array<b2_t, size_t, vec_t, reversible_interval_index<vec_t, 2>> b2_to_pos{};
+        sets_array<b3_t, size_t, vec_t, interval_index<vec_t>>               b3_to_b2{};
         using size_type = typename vec_t::size_type;
         size_type nkmers{};
 
@@ -295,24 +295,23 @@ template<typename seed_model> class seedlib_index : public seed_model
                 debug_op((std::cerr << b2 << "," << b3 << ":" << rec.pos));
 
                 bool found = false;
-                b2_to_pos.iterate_set(b2, [&](size_t pos) {
-                    bool is_target = rec.pos == pos;
-                    found |= is_target;
-                    return not is_target;
-                });
+                for (size_t pos : b2_to_pos[b2])
+                    if (rec.pos == pos) {
+                        found = true;
+                        break;
+                    }
                 assert(found, "position not found in the b2_to_pos");
 
                 found = false;
-                b3_to_b2.iterate_set(b3, [&](size_t b2_idx) {
+                for (size_t b2_idx : b3_to_b2[b3]) {
                     b2_t   recovered_b2 = b2_to_pos.get_key(b2_idx);
                     size_t pos          = b2_to_pos.get_value(b2_idx, recovered_b2);
                     if (rec.pos == pos) {
                         found = true;
                         assert(recovered_b2 == b2.kmer, "b3->b2 mismatch b2=%ld != %ld", b2.kmer, recovered_b2);
-                        return false;
+                        break;
                     }
-                    return true;
-                });
+                }
 
                 debug_op(std::cerr << std::endl);
                 assert(found, "b2 not found in b3_to_b2 b3=%ld", b3.kmer);
@@ -357,52 +356,48 @@ template<typename seed_model> class seedlib_index : public seed_model
         template<typename F> void query_b2insb3(const seed_model& model, b2_t b2, b3_t b3, F&& f) const
         {
             assert(b2 < (kmer_t(1u) << 2u * ksize_t(model.b2_size() + 1)), "kmer larger than expected");
-            b3_to_b2.iterate_set(b3, [&](size_t b2_idx) hot_fun {
+            for (size_t b2_idx : b3_to_b2[b3]) {
                 b2_t target_b2 = b2_to_pos.get_key(b2_idx);
                 if (test_1indel_match(target_b2, b2, model.b2_size())) {
                     f(b2_to_pos.get_value(b2_idx, target_b2), model.kmerins_size());
                 }
-                return true;
-            });
+            }
         }
 
         /// Map a b2
         template<typename F> void query_b2(const seed_model& model, b2_t b2, F&& f) const
         {
             assert(b2 < kmer_t(1u) << 2 * (model.b2_size()), "kmer larger than expected");
-            b2_to_pos.iterate_set(b2, [&](size_t pos) {
+            for (size_t pos : b2_to_pos[b2]) {
                 f(pos, model.b1b2_size());
-                return true;
-            });
+            }
         }
 
         /// Map a (b2, b3) with one substitution in b2, b2 size is b2_sz
         template<typename F> void query_b2b3(const seed_model& model, b2_t b2, b3_t b3, bool reportexact, F&& f) const
         {
             assert(b2 < kmer_t(1u) << 2u * ksize_t(model.b2_size()), "kmer larger than expected");
-            b3_to_b2.iterate_set(b3, [&](size_t b2_idx) {
+            for (size_t b2_idx : b3_to_b2[b3]) {
                 b2_t target_b2 = b2_to_pos.get_key(b2_idx);
                 bool match     = b2 == target_b2;
-                if (match && !reportexact) return true;
+                if (match && !reportexact) continue;
                 if (match || test_1sub_match(b2, target_b2)) {
                     f(b2_to_pos.get_value(b2_idx, target_b2), model.kmer_size());
                 }
-                return true;
-            });
+            }
         }
 
         /// Map a (b2, b3) with one deletion in b2, b2 size is b2_sz - 1
         template<typename F> void query_b2delb3(const seed_model& model, b2_t b2, b3_t b3, F&& f) const
         {
             assert(b2 < kmer_t(1u) << 2u * ksize_t(model.b2_size() - 1), "kmer larger than expected");
-            b3_to_b2.iterate_set(b3, [&](size_t b2_idx) hot_fun {
+            for (size_t b2_idx : b3_to_b2[b3]) {
                 b2_t target_b2 = b2_to_pos.get_key(b2_idx);
                 debug_op((std::cerr << " candiate b2:" << sized_kmer<b2_t>{target_b2, seed_model::b2_sz} << std::endl));
                 if (test_1indel_match(b2, target_b2, model.b2_size() - 1)) {
                     f(b2_to_pos.get_value(b2_idx, target_b2), model.kmerdel_size());
                 }
-                return true;
-            });
+            };
         }
 
         template<typename F>

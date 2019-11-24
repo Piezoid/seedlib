@@ -209,11 +209,11 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
 template<typename K, typename V, typename vec_t = gatbl::int_vector<>, typename index_t = interval_index<>>
 struct sets_array
 {
-    using key_t     = K;
-    using value_t   = V;
-    using size_type = typename vec_t::size_type;
-    using iterator  = typename vec_t::const_iterator;
-    using range     = gatbl::iterator_pair<iterator, iterator>;
+    using key_t      = K;
+    using value_type = V;
+    using size_type  = typename vec_t::size_type;
+    using iterator   = typename vec_t::const_iterator;
+    using range      = gatbl::iterator_pair<iterator>;
 
     sets_array()             = default;
     sets_array(sets_array&&) = default;
@@ -288,11 +288,13 @@ struct sets_array
             // debug_op((std::cout << sized_kmer<block_t>{key, b} << ":" << value));
 
             bool found = false;
-            iterate_set(key, [&](value_t val) {
-                found |= val == value;
+            for (value_type val : operator[](key)) {
                 debug_op(std::cout << val << " ");
-                return not found;
-            });
+                if (val == value) {
+                    found = true;
+                    break;
+                }
+            }
 
             assert(found, "Value inserted not found");
 
@@ -324,6 +326,7 @@ struct sets_array
         _index.stat(report, prefix + "::index");
     }
 
+    /// Return a range of values in the set of `key`
     range operator[](key_t key) const
     {
         auto range = _index.get_bounds(key);
@@ -334,14 +337,15 @@ struct sets_array
         return {first, last};
     }
 
-    template<typename F> hot_fun void iterate_set(key_t key, F&& f) const
+    /// Same as operator[] but allows to derive a compact representation for delayed consumption
+    using rangebegin_and_size_t = std::pair<typename vec_t::const_iterator, size_t>;
+    rangebegin_and_size_t get_rangebegin_and_size(key_t key) const
     {
         auto range = _index.get_bounds(key);
-        auto it    = _values.begin();
-        std::advance(it, range.first);
-        for (size_t i = range.second - range.first; i-- > 0; it++) {
-            if (not f(*it)) break;
-        }
+        auto first = _values.begin();
+        std::advance(first, range.first);
+        assume(range.second >= range.first, "inverted indices");
+        return {first, range.second - range.first};
     }
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated key
@@ -352,25 +356,24 @@ struct sets_array
     }
 
     /// Given an indice handed to the on_insert callback during consturction, find the associated value
-    value_t hot_fun get_value(size_type idx,
-                              key_t     key       = 0,
-                              value_t   max_value = 0) const // FIXME last two fileds not used anymore
+    value_type hot_fun get_value(size_type  idx,
+                                 key_t      key       = 0,
+                                 value_type max_value = 0) const // FIXME last two fileds not used anymore
     {
         assume(*this, "query on empty multimap");
         assume(idx < _values.size(), "idx out of bound, should be %lu <= size=%lu", idx, _values.size());
         return _values[idx];
     }
 
-    std::pair<key_t, value_t> get_key_value(size_type idx) const
+    std::pair<key_t, value_type> get_key_value(size_type idx) const
     {
         key_t key = get_key(idx);
         return {key, _values[idx]};
     }
 
   private:
-    static constexpr size_type bit_offset = 10;
-    vec_t                      _values{};
-    index_t                    _index{};
+    vec_t   _values{};
+    index_t _index{}; /// Intervals in _values for each key
 };
 
 }
