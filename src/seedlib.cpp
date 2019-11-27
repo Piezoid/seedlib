@@ -93,12 +93,16 @@ template<typename ValueT = uint32_t, typename SizeT = ValueT> struct LIS
     std::vector<size_type> M;
 
   public:
-    void init(size_type len = 0)
+    void reserve(size_type len = 0)
+    {
+        X.reserve(len);
+        M.reserve(len);
+    }
+
+    void clear()
     {
         X.clear();
         M.clear();
-        X.reserve(len);
-        M.reserve(len);
     }
 
     size_t seq_size() const { return X.size(); }
@@ -146,7 +150,7 @@ template<typename ValueT = uint32_t, typename SizeT = ValueT> struct LIS
     {
         // Reconstruct the longest increasing subsequence
         const auto last = M.rend() - 1;
-        for (auto it = M.rbegin(); it != last;) {
+        for (auto it = M.rbegin(); it < last;) {
             size_type pred = X[*it].pred;
             *++it          = pred;
         }
@@ -161,17 +165,33 @@ class query::impl
     using index_t  = seedlib_index<>;
     using seed_tys = seed_types;
     using seed_tys::kmerins_t;
-    using seq_base = gatbl::details::sequence2kmers_base<query::impl, gatbl::kmer_window<seed_types::kmerins_t>>;
+    using seq_base     = gatbl::details::sequence2kmers_base<query::impl, gatbl::kmer_window<seed_types::kmerins_t>>;
+    using target_pos_t = size_t; /// Position on the concatenated target sequence
 
     const index_t&               index;
     const entropy_filter<kmer_t> kmer_filter;
     const callback_t             on_read;
 
-    std::vector<seed_t>    results;
-    std::vector<seed_t>    filtered_results;
-    LIS<query_pos_t>       lis;
+    /// Current read id
+    read_id_t curr_read = read_id_t(-1);
+
+    /// Seed on the concatenated target sequence
+    struct raw_seed_t
+    {
+        target_pos_t target_pos;
+        read_pos_t   query_pos;
+        bool         operator<(const raw_seed_t& other) const { return this->target_pos < other.target_pos; }
+    };
+    /// Raw seed on both strands
+    std::vector<raw_seed_t> results_fwd;
+    std::vector<raw_seed_t> results_rev;
+    /// LIS structure, hold the allocations for reuse
+    LIS<read_pos_t> lis_fwd;
+    LIS<read_pos_t> lis_rev;
+    /// Physical storage of seed handed to the user
+    std::vector<seed_t> filtered_results;
+    /// List of mapping, references seeds in filtered_results
     std::vector<mapping_t> mappings;
-    read_id_t              curr_read = read_id_t(-1);
 
   public:
     impl(const index_t& index, callback_t on_read)
@@ -182,7 +202,7 @@ class query::impl
       , on_read(on_read)
     {}
 
-    template<typename F> hot_fun void kmer_query(kmerins_t kmer, F&& f) // FIXME: move
+    template<typename F> void kmer_query(kmerins_t kmer, F&& f) // FIXME: move
     {
         const auto& part = this->index.get_part(this->kmerins_to_b1()(kmer));
         if (unlikely(not part)) return;
@@ -194,73 +214,106 @@ class query::impl
 
     void hot_fun on_kmer()
     {
-        auto query_pos = query_pos_t(seq_base::get_pos());
+        auto query_pos = read_pos_t(seq_base::get_pos());
         auto kmer      = seq_base::get_window().forward();
         if (not this->kmer_filter(kmer)) return;
 
         auto on_fwd_match = [&](size_t target_pos, ksize_t seed_size) {
-            results.emplace_back(seed_t{query_pos, target_pos});
+            results_fwd.emplace_back(raw_seed_t{target_pos, query_pos});
         };
         kmer_query(kmer, on_fwd_match);
 
-        query_pos = -(1 + this->kmerins_size() + query_pos);
+        query_pos = this->kmerins_size() + query_pos;
 
         auto on_rev_match = [&](size_t target_pos, ksize_t seed_size) {
-            assume(query_pos + seed_size < 0, "rc position positive");
-            results.emplace_back(seed_t{query_pos + seed_size, target_pos});
+            assume(query_pos - seed_size >= 0, "rc position negative");
+            results_rev.emplace_back(raw_seed_t{target_pos, query_pos - seed_size});
         };
         kmer_query(seq_base::get_window().reverse(), on_rev_match);
     }
 
-    bool noinline_fun flatten_fun send_results()
+    bool send_results()
     {
+        const size_t minimum_mapping_length = 5; // FIXME
+
         const auto& seq_index = this->index._seq_index;
         const auto  query_len = read_pos_t(this->get_next_pos());
 
-        std::sort(results.begin(), results.end());
+        std::sort(results_fwd.begin(), results_fwd.end());
+        std::sort(results_rev.begin(), results_rev.end());
+
+        lis_fwd.reserve(query_len);
+        lis_rev.reserve(query_len);
+
+        // Ensure that it will not reallocate while we are appending
         filtered_results.clear();
-        filtered_results.reserve(results.size()); // Ensure that it will not reallocate while we are appending
-        auto filtered_results_begin = &*filtered_results.begin();
+        filtered_results.reserve(results_fwd.size() + results_rev.size());
+        auto filtered_results_begin = filtered_results.begin();
 
-        const auto last = results.end();
-        for (auto it = results.begin(); it < last;) {
-            auto target_id     = read_id_t(seq_index.get_key(it->target_pos));
-            auto target_bounds = seq_index.get_bounds(target_id);
-            assume(target_bounds.first <= target_bounds.second && it->target_pos >= target_bounds.first
-                     && it->target_pos < target_bounds.second,
-                   "invalid position interval");
+        const auto last_fwd  = results_fwd.end();
+        const auto last_rev  = results_rev.end();
+        auto       it_fwd    = results_fwd.begin();
+        auto       it_rev    = results_rev.begin();
+        auto       target_id = read_id_t(-1);
+        while (true) { // For each target sequence
+            constexpr auto notarget_pos    = std::numeric_limits<target_pos_t>::max();
+            auto           next_target_pos = notarget_pos;
+            next_target_pos                = it_fwd != last_fwd ? it_fwd->target_pos : next_target_pos;
+            next_target_pos
+              = it_rev != last_rev && it_rev->target_pos <= next_target_pos ? it_rev->target_pos : next_target_pos;
+            if (next_target_pos == notarget_pos) break;
 
-            lis.init(query_len);
-            const seed_t* unfiltered_seeds_start = &(*it);
-            const auto    target_length          = read_pos_t(target_bounds.second - target_bounds.first);
-            for (; it < last && it->target_pos < target_bounds.second; it++) {
-                assume(it->target_pos >= target_bounds.first, "invalid position interval");
-                lis.push_back(it->query_pos);
+            target_id                = read_id_t(seq_index.get_key(next_target_pos, target_id + 1));
+            const auto target_bounds = seq_index.get_bounds(target_id);
+            const auto target_length = read_pos_t(target_bounds.second - target_bounds.first);
+
+            lis_fwd.clear();
+            const raw_seed_t* unfiltered_seeds_fwd_start = &(*it_fwd);
+            for (; it_fwd < last_fwd && it_fwd->target_pos < target_bounds.second; it_fwd++) {
+                assume(it_fwd->target_pos >= target_bounds.first && it_fwd->target_pos < target_bounds.second,
+                       "seed out of current target read");
+                lis_fwd.push_back(it_fwd->query_pos);
             }
 
-            const auto& traceback = lis.traceback();
-            if (traceback.size() >= 5) {
+            lis_rev.clear();
+            const raw_seed_t* unfiltered_seeds_rev_start = &(*it_rev);
+            for (; it_rev < last_rev && it_rev->target_pos < target_bounds.second; it_rev++) {
+                assume(it_rev->target_pos >= target_bounds.first && it_rev->target_pos < target_bounds.second,
+                       "seed out of current target read");
+                lis_rev.push_back(it_rev->query_pos);
+            }
+
+            const bool   fwd_larger  = lis_fwd.subseq_size() >= lis_rev.subseq_size();
+            const size_t subseq_size = fwd_larger ? lis_fwd.subseq_size() : lis_rev.subseq_size();
+
+            if (subseq_size >= minimum_mapping_length) {
+                const auto&       traceback = fwd_larger ? lis_fwd.traceback() : lis_rev.traceback();
+                const raw_seed_t* unfiltered_seeds_start
+                  = fwd_larger ? unfiltered_seeds_fwd_start : unfiltered_seeds_rev_start;
                 const seed_t* filtered_seeds_start = &*filtered_results.end();
-                auto          prev_seed            = seed_t{std::numeric_limits<query_pos_t>::min(), 0};
+
+                auto prev_seed = raw_seed_t{0, 0};
                 for (auto idx : traceback) {
                     const auto& seed = unfiltered_seeds_start[idx];
-                    assume(seed.target_pos >= target_bounds.first && seed.target_pos < target_bounds.second,
-                           "seed outside of current target read");
                     assert(seed.target_pos >= prev_seed.target_pos && seed.query_pos >= prev_seed.query_pos,
                            "not increasing sequence");
-                    filtered_results.emplace_back(seed_t{seed.query_pos, seed.target_pos - target_bounds.first});
+                    auto target_pos = seed.target_pos - target_bounds.first;
+                    assume(seed.target_pos >= target_bounds.first
+                             && target_pos <= std::numeric_limits<read_pos_t>::max(),
+                           "target pos out of range");
+                    filtered_results.emplace_back(seed_t{read_pos_t(target_pos), seed.query_pos});
                     prev_seed = seed;
                 }
-
-                assert(filtered_results_begin == &*filtered_results.begin(), "filtered_results reallocated");
-                mappings.emplace_back(
-                  mapping_t{target_id, target_length, filtered_seeds_start, &*filtered_results.end()});
+                assume(filtered_results_begin == filtered_results.begin(), "filtered_results reallocated");
+                mappings.emplace_back(mapping_t{
+                  (target_id << 1) | fwd_larger, target_length, filtered_seeds_start, &*filtered_results.end()});
             }
         }
 
         bool do_next_read = on_read(curr_read, query_len, mappings);
         mappings.clear();
-        results.clear();
+        results_fwd.clear();
+        results_rev.clear();
 
         return do_next_read;
     }

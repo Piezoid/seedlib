@@ -65,27 +65,28 @@ class query
     pimpl_t pimpl;
 
   public:
-    using read_pos_t  = uint32_t;
-    using query_pos_t = int32_t;
-    using read_id_t   = uint32_t;
+    using read_pos_t = uint32_t;
+    using read_id_t  = uint32_t;
 
-    struct seed_t
+    struct __attribute__((packed)) seed_t
     {
-        query_pos_t query_pos;
-        size_t      target_pos;
-        bool        operator<(const seed_t& other) const { return this->target_pos < other.target_pos; }
+        read_pos_t target_pos;
+        read_pos_t query_pos;
     };
 
     struct mapping_t
     {
-        read_id_t     target_id;
-        read_pos_t    target_length;
-        const seed_t* first;
-        const seed_t* last;
+        read_id_t     _target_id;
+        read_pos_t    _target_length;
+        const seed_t* _first;
+        const seed_t* _last;
 
-        size_t        size() const { return last - first; }
-        const seed_t* begin() const { return first; }
-        const seed_t* end() const { return last; }
+        read_id_t     target_id() const { return _target_id >> 1; }
+        read_id_t     is_rev() const { return (_target_id & 1) == 0; }
+        read_pos_t    target_length() const { return _target_length; }
+        size_t        size() const { return _last - _first; }
+        const seed_t* begin() const { return _first; }
+        const seed_t* end() const { return _last; }
     };
 
     using callback_t = gatbl::erased_closure_ref<bool(read_id_t, read_pos_t, const std::vector<mapping_t>&)>;

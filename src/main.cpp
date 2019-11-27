@@ -53,13 +53,15 @@ query_index(const std::vector<std::string>& fq_in, const std::string& index_name
       = [&](query::read_id_t query_id, query::read_pos_t query_length, const std::vector<query::mapping_t>& mappings) {
             //            doNotOptimize(mappings);
             //            return true;
-            std::cout << query_id << "(" << query_length << "): \n";
+            std::cout << query_id << '(' << query_length << "): \n";
             for (const auto& mapping : mappings) {
-                if (mapping.target_id == query_id || mapping.size() < 5) continue;
+                if (mapping.target_id() == query_id || mapping.size() < 5) continue;
 
-                std::cout << "\t" << mapping.target_id << "(" << mapping.target_length << "): ";
+                std::cout.put('\t');
+                if (mapping.is_rev()) std::cout.put('-');
+                std::cout << mapping.target_id() << '(' << mapping.target_length() << "): ";
                 for (auto& seed : mapping)
-                    std::cout << seed.query_pos << "/" << seed.target_pos << " ";
+                    std::cout << seed.query_pos << '/' << seed.target_pos << ' ';
                 std::cout.put('\n');
             }
 
