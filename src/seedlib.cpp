@@ -218,7 +218,7 @@ class query::impl
         auto kmer      = seq_base::get_window().forward();
         if (not this->kmer_filter(kmer)) return;
 
-        auto on_fwd_match = [&](size_t target_pos, ksize_t seed_size) {
+        auto on_fwd_match = [&](size_t target_pos, ksize_t) {
             results_fwd.emplace_back(raw_seed_t{target_pos, query_pos});
         };
         kmer_query(kmer, on_fwd_match);
@@ -239,6 +239,7 @@ class query::impl
         const auto& seq_index = this->index._seq_index;
         const auto  query_len = read_pos_t(this->get_next_pos());
 
+        // Sort by increasing target_pos
         std::sort(results_fwd.begin(), results_fwd.end());
         std::sort(results_rev.begin(), results_rev.end());
 
@@ -255,7 +256,7 @@ class query::impl
         auto       it_fwd    = results_fwd.begin();
         auto       it_rev    = results_rev.begin();
         auto       target_id = read_id_t(-1);
-        while (true) { // For each target sequence
+        while (true) { // Gather results for each target sequence in the index
             constexpr auto notarget_pos    = std::numeric_limits<target_pos_t>::max();
             auto           next_target_pos = notarget_pos;
             next_target_pos                = it_fwd != last_fwd ? it_fwd->target_pos : next_target_pos;

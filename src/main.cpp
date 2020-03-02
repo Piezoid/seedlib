@@ -84,7 +84,6 @@ main(int argc, char* argv[])
     seedlib::index_config config;
     double                downsampling = 1.0;
     mode                  selected     = mode::help;
-    bool                  split = false, progr = false;
 
     auto indexArg   = required("-i", "--index") & value("index", config.output);
     auto inputsArgs = values("fast(a|q) files", config.inputs);
@@ -96,7 +95,9 @@ main(int argc, char* argv[])
          option("--b1_len", "-1") & value("b1_len", config.b1) % "b1 length (int [1-8])",
          option("--b2_len", "-2") & value("b2_len", config.b2) % "b2 length (int [0-8], =0 use b1)",
          option("--b3_len", "-3") & value("b3_len", config.b3) % "b3 length (int [0-8], =0 use b1)",
-         option("--complexity", "-c") & value("2nuc entropy", config.min_entropy) % "min entropy in bits (float [0-4])",
+         option("--complexity", "-c")
+           & value("entropy (bits)", config.min_entropy)
+               % "min entropy (in bits, float [0-4]), of the 2mers distribution in b1+b2+b3-mers",
          option("--downsample", "-d")
            & value("downsample", downsampling) % "inverse of fraction of positions retained (float [0-1])",
          option("--b1vsb1b2", "-r")

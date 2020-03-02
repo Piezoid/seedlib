@@ -119,7 +119,7 @@ template<typename T> struct partition
         size_t delta = record.pos - _last_pos;
         _last_pos    = record.pos;
 
-        while (true) { // For retrying after dump
+        while (true) { // For retrying after failed dump
             uint8_t* p = bits::store_int_vb(_buffer_ptr, _buffer_end, delta);
             if (p + sizeof(T) <= _buffer_end) {
                 size_t check_delta;
@@ -272,7 +272,7 @@ template<typename seed_model> class seedlib_index : public seed_model
                          b2_extractor.image_size(),
                          max_pos,
                          b2_extractor,
-                         [&](positioned_b2b3_t& rec) { return rec.pos; },
+                         [](positioned_b2b3_t& rec) { return rec.pos; },
                          [&](const positioned_b2b3_t& rec, size_t idx) {
                              b3_to_b2idx_pairs.emplace_back(b3_to_b2idx_t{b3_extractor(rec), idx});
                          }};
@@ -338,6 +338,8 @@ template<typename seed_model> class seedlib_index : public seed_model
         template<typename I> friend I& read(I& in, part_index& pi)
         {
             using gatbl::read;
+
+            pi.clear();
             read(in, pi.nkmers);
             read(in, pi.b2_to_pos);
             read(in, pi.b3_to_b2);
@@ -432,7 +434,6 @@ template<typename seed_model> class seedlib_index : public seed_model
                   double             b1_ratio       = 1.0,
                   double             b1b2_ratio     = 1.0)
       : seed_model(std::forward<SeedModel>(sm))
-      , name(index_name)
       , _entropy_thresh(entropy_thresh)
     {
         const ksize_t suffix_size    = seed_model::b2_size() + seed_model::b3_size();
@@ -467,7 +468,7 @@ template<typename seed_model> class seedlib_index : public seed_model
         for (auto& part : partitions)
             part.seal();
 
-        f2kmer.start(); // Simulate a new sequence such that we get then ending position of the last one
+        f2kmer.start(); // Simulate a new sequence such that we get the ending position of the last one
         _seq_index = std::move(seq_ends);
 
         std::cerr << "Loading partitions..." << std::endl;
@@ -543,7 +544,7 @@ template<typename seed_model> class seedlib_index : public seed_model
 
     const part_index& get_part(b1_t b1) const
     {
-        assert(b1 < _partitions.size(), "b1 out of range");
+        assume(b1 < _partitions.size(), "b1 out of range");
         return _partitions[b1];
     }
 
@@ -559,7 +560,6 @@ template<typename seed_model> class seedlib_index : public seed_model
 
     std::vector<part_index> _partitions     = {};
     chrom_starts_t          _seq_index      = {};
-    std::string             name            = {};
     double                  _entropy_thresh = 0;
 };
 
