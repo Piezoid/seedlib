@@ -308,8 +308,8 @@ struct LIS : public Compare
         auto island_start = chain.last_island_first_value;
         auto island_end   = X[last_idx].value;
 
-        pred          = -1;
-        auto isparams = get_island_params(chain, pred);
+        pred = -1;
+        // auto isparams = get_island_params(chain, pred);
 
         // Should we drop the previous island ?
         auto island_span = distance(island_start, island_end) + 1;
@@ -374,7 +374,7 @@ struct LIS : public Compare
                         assume(new_chain.last_island_first_value == x, "wtf");
                         pred = i;
                     } else {
-                        assume(pred == pred2, "wtf");
+                        //                        assume(pred == pred2, "wtf");
                     }
                 }
 
@@ -410,7 +410,7 @@ struct LIS : public Compare
                         assume(initial_prevsubseq == 0 || pred < prevsubseq.xidx,
                                "wtf"); // FIXME
                     }
-                    assume(pred == pred2, "wtf");
+                    //                    assume(pred == pred2, "wtf");
                 }
 
                 if (overwritten_chain == 0) {
