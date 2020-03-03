@@ -395,7 +395,8 @@ template<typename seed_model> class seedlib_index : public seed_model
             assert(b2 < kmer_t(1u) << 2u * ksize_t(model.b2_size() - 1), "kmer larger than expected");
             for (size_t b2_idx : b3_to_b2[b3]) {
                 b2_t target_b2 = b2_to_pos.get_key(b2_idx);
-                debug_op((std::cerr << " candiate b2:" << sized_kmer<b2_t>{target_b2, seed_model::b2_sz} << std::endl));
+                debug_op(
+                  (std::cerr << " candiate b2:" << gatbl::sized_kmer<b2_t>{target_b2, model.b2_size()} << std::endl));
                 if (test_1indel_match(b2, target_b2, model.b2_size() - 1)) {
                     f(b2_to_pos.get_value(b2_idx, target_b2), model.kmerdel_size());
                 }
@@ -476,14 +477,15 @@ template<typename seed_model> class seedlib_index : public seed_model
         std::vector<positioned_b2b3_t> records;
         _partitions.reserve(npartitions);
         for (auto& part : partitions) {
-            debug_op((b1_t part_id = sized_kmer<b1_t>{b1_t(&part - partitions.data()), this->b1_sz}));
+            auto part_id = gatbl::sized_kmer<b1_t>{b1_t(&part - partitions.data()), this->b1_size()};
             debug_op(std::cerr << "block " << part_id << std::endl);
 
             records.reserve(part.size());
             part.iterate([&](positioned_b2b3_t posbp) {
                 records.emplace_back(posbp);
-                debug_op(auto reconstructed_kmer = posbp.data | (kmer_t(part_id.kmer) << (2 * suffix_size)));
-                debug_op((std::cerr << sized_kmer<kmer_t>{reconstructed_kmer, kmer_size} << " " << posbp.pos << endl));
+                auto reconstructed_kmer = posbp.data | (kmer_t(part_id.kmer) << (2 * suffix_size));
+                debug_op((std::cerr << gatbl::sized_kmer<kmer_t>{reconstructed_kmer, kmer_size} << " " << posbp.pos
+                                    << std::endl));
             });
             _partitions.emplace_back(*this, records, b1b2_ratio);
             records.clear();
