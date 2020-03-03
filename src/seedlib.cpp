@@ -254,7 +254,7 @@ struct LIS : public Compare
     static constexpr size_t max_island_invdensity = 10; // Maximal inverse density of elements in island
     static constexpr size_t min_island_size       = 3;  // Minimum number of elements in island
 
-    size_type is_island(const sentry& chain, value_type value, sentry& new_chain)
+    size_type is_island(const sentry& chain, value_type value, sentry& new_chain, size_type& pred)
     {
         // Where the last island end ? Is the new value on it own new island ?
         const auto island_end = X[chain.xidx].value;
@@ -262,6 +262,7 @@ struct LIS : public Compare
             // We are appending an element to the current island
             new_chain.last_island_size        = chain.last_island_size + 1;
             new_chain.last_island_first_value = chain.last_island_first_value;
+            pred                              = chain.xidx;
             return 0;
         } else {
             // New island
@@ -269,18 +270,46 @@ struct LIS : public Compare
             new_chain.last_island_first_value = value;
 
             // Should we drop the previous island ?
-            return is_small_island(chain);
+            return is_small_island(chain, pred);
         }
+    }
+
+    sentry get_island_params(const sentry& chain, size_type& pred)
+    {
+        size_type  xidx       = chain.xidx;
+        value_type next_value = X[xidx].value;
+
+        size_type size = 1;
+        while (X[xidx].pred != xidx) {
+            xidx   = X[xidx].pred;
+            auto d = distance(next_value, X[xidx].value);
+            if (d > min_island_dist) {
+                assume(chain.last_island_size == size, "wtf");
+                assume(chain.last_island_first_value == next_value, "wtf");
+                pred = xidx;
+                return sentry{chain.xidx, size, next_value};
+            }
+            size++;
+            next_value = X[xidx].value;
+        }
+
+        assume(chain.last_island_size == size, "wtf");
+        assume(chain.last_island_first_value == next_value, "wtf");
+        pred = xidx;
+        return sentry{chain.xidx, size, next_value};
     }
 
     /// Check whether the island ending the chain is not big or dense enough to be kept.
     /// Return 0 if the island is ok, otherwise, returns the size of the island to drop.
-    size_type is_small_island(const sentry& chain)
+    size_type is_small_island(const sentry& chain, size_type& pred)
     {
         auto last_idx     = chain.xidx;
         auto island_size  = chain.last_island_size;
         auto island_start = chain.last_island_first_value;
         auto island_end   = X[last_idx].value;
+
+        pred          = -1;
+        auto isparams = get_island_params(chain, pred);
 
         // Should we drop the previous island ?
         auto island_span = distance(island_start, island_end) + 1;
@@ -289,17 +318,18 @@ struct LIS : public Compare
                            << " d=" << density << ' ');
 
         if (island_size < min_island_size || island_span > max_island_invdensity * island_size) { return island_size; }
+        pred = chain.xidx;
         return 0;
     }
 
-    void test_backref_order(size_t xidx)
+    void test_chain(size_t chain_idx)
     {
-#ifndef NDEBUG
-        while (xidx != 0) {
+        auto xidx = M[chain_idx].xidx;
+        for (; chain_idx > 0; chain_idx--) {
             assume(X[xidx].pred < xidx, "wtf");
             xidx = X[xidx].pred;
         }
-#endif
+        assume(xidx == X[xidx].pred, "wtf"); // First elem in the chain is self referencing.
     }
 
     /// Add a value to the lis
@@ -312,32 +342,47 @@ struct LIS : public Compare
         debug_op(std::cout << "Adding: " << i << ":" << x << "\t");
         size_type pred; // Predecessor for the subsequence ending at the added element
 
+        size_type chain_idx = 0;
+
         if (i > 0) {                     // Not the first element
             auto& prevsubseq = M.back(); // previous longest chain
-            test_backref_order(M.back().xidx);
 
             const size_type prevsubseq_end = prevsubseq.xidx; // Idx of the last element previous longest chain
             if (is_accepting_idx(prevsubseq_end, x)) {        // If we are continuing the current sub-sequence
 
-                auto elems_to_drop = is_island(prevsubseq, x, new_chain);
+                size_type pred2;
+                auto      elems_to_drop = is_island(prevsubseq, x, new_chain, pred2);
 
                 pred = prevsubseq_end;
 
                 if (elems_to_drop > 0) {
+                    auto msize_before = M.size();
                     for (size_type i = 0; i < elems_to_drop; i++) {
                         debug_op(std::cout << pred << ':' << X[pred].value << ' ');
-                        assume(pred == 0 || X[pred].pred < pred, "wtf");
+
+                        assume(M.size() == 1 ? X[pred].pred == pred : X[pred].pred < pred, "wtf");
                         assume(pred < new_chain.xidx, "wtf");
                         pred = X[pred].pred;
+
+                        assume(M.size() > 0, "wtf");
                         M.pop_back();
                     }
-                    assume(prevsubseq_end == 0 || pred < prevsubseq_end, "wtf");
+                    assume(msize_before <= 1 || pred < prevsubseq_end, "wtf");
+
+                    if (M.size() == 0) {
+                        assume(new_chain.last_island_size == 1, "wtf");
+                        assume(new_chain.last_island_first_value == x, "wtf");
+                        pred = i;
+                    } else {
+                        assume(pred == pred2, "wtf");
+                    }
                 }
 
                 debug_op(std::cout << "\t==> idxM:add" << M.size() << " s:" << new_chain.last_island_size
                                    << " isstart:" << new_chain.last_island_first_value << " pred:" << pred << ':'
                                    << X[pred].value << std::endl);
                 //                assume(M.capacity() > M.size(), "not preallocated");
+                chain_idx = M.size();
                 M.emplace_back(std::move(new_chain));
 
             } else {
@@ -348,32 +393,37 @@ struct LIS : public Compare
                 if (overwritten_chain > 0) {
                     const auto& prevsubseq = M[overwritten_chain - 1];
                     pred                   = prevsubseq.xidx;
-                    test_backref_order(pred);
-                    auto elems_to_drop = is_island(prevsubseq, x, new_chain);
+                    size_type pred2;
+                    auto      elems_to_drop = is_island(prevsubseq, x, new_chain, pred2);
 
                     if (elems_to_drop > 0) {
+                        auto initial_prevsubseq = overwritten_chain - 1;
                         for (size_type i = 0; i < elems_to_drop; i++) {
                             debug_op(std::cout << pred << ':' << X[pred].value << ' ');
-                            assume(pred == 0 || X[pred].pred < pred, "wtf");
+                            assume(overwritten_chain == 1 || X[pred].pred < pred, "wtf");
                             assume(pred < new_chain.xidx, "wtf");
                             pred = X[pred].pred;
                             assume(overwritten_chain > 0, "wtf");
                             overwritten_chain--;
                         }
                         debug_op(std::cout << pred << ':' << X[pred].value << "f drop");
-                        assume(prevsubseq_end == 0 || pred < prevsubseq.xidx, "wtf");
+                        assume(initial_prevsubseq == 0 || pred < prevsubseq.xidx,
+                               "wtf"); // FIXME
                     }
+                    assume(pred == pred2, "wtf");
+                }
 
-                } else {
+                if (overwritten_chain == 0) {
                     // Re-start a first island
                     new_chain.last_island_size        = 1;
                     new_chain.last_island_first_value = x;
-                    pred                              = 0;
+                    pred                              = i;
                 }
 
                 debug_op(std::cout << "\t==> idxM:ovw" << overwritten_chain << " s:" << new_chain.last_island_size
                                    << " isstart:" << new_chain.last_island_first_value << " pred:" << pred << ':'
                                    << X[pred].value << std::endl);
+                chain_idx            = overwritten_chain;
                 M[overwritten_chain] = std::move(new_chain);
             }
         } else {
@@ -383,7 +433,41 @@ struct LIS : public Compare
         }
         //        assume(X.capacity() > X.size(), "not preallocated");
         X.push_back({x, pred});
-        test_backref_order(i);
+        test_chain(chain_idx);
+    }
+
+    size_t drop_last_island()
+    {
+        if (M.size() == 0) return 0;
+
+        test_chain(M.size() - 1);
+        const auto& longest_chain = M.back();
+        debug_op(std::cout << "Check last island:");
+        size_type pred2;
+        auto      elems_to_drop = is_small_island(longest_chain, pred2);
+
+        size_type pred = M.back().xidx;
+
+        if (elems_to_drop > 0) {
+            assume(elems_to_drop <= M.size(), "wtf");
+            if (elems_to_drop >= M.size()) {
+                M.clear();
+            } else {
+                for (size_type i = 0; i < elems_to_drop; i++) {
+                    debug_op(std::cout << pred << ':' << X[pred].value << ' ');
+                    assume(pred == 0 || X[pred].pred < pred, "wtf");
+                    assume(X[pred].pred < longest_chain.xidx, "wtf");
+                    pred = X[pred].pred;
+                }
+                assume(longest_chain.xidx == 0 || pred < longest_chain.xidx, "wtf");
+
+                M.resize(M.size() - elems_to_drop);
+                M.back().xidx = pred;
+            }
+        }
+
+        if (not M.empty()) test_chain(M.size() - 1);
+        return elems_to_drop;
     }
 
     /// Returns the indices of the LIS elements in the original sequence.
@@ -392,33 +476,23 @@ struct LIS : public Compare
     /// Calling multiple times is inefficient, but safe since the result is a fixpoint.
     const std::vector<size_type> traceback()
     {
-        const auto& longest_chain = M.back();
-        debug_op(std::cout << "Check last island:");
-        auto elems_to_drop = is_small_island(longest_chain);
+        drop_last_island();
 
-        size_type pred = M.back().xidx;
+        if (M.size()) {
+            size_type pred = M.back().xidx;
 
-        if (elems_to_drop > 0) {
-            for (size_type i = 0; i < elems_to_drop; i++) {
-                debug_op(std::cout << pred << ':' << X[pred].value << ' ');
-                assume(pred == 0 || X[pred].pred < pred, "wtf");
-                assume(X[pred].pred < longest_chain.xidx, "wtf");
+            // Reconstruct in M indices of the longest increasing subsequence
+            std::vector<size_type> res(M.size());
+            const auto             last = res.rend();
+            for (auto it = res.rbegin(); it < last; it++) {
+                *it = pred;
+                assume(it == last - 1 || X[pred].pred < pred, "wtf");
                 pred = X[pred].pred;
             }
-            assume(longest_chain.xidx == 0 || pred < longest_chain.xidx, "wtf");
-        }
-        debug_op(std::cout << std::endl);
 
-        // Reconstruct in M indices of the longest increasing subsequence
-        std::vector<size_type> res(M.size() - elems_to_drop);
-        const auto             last = res.rend();
-        for (auto it = res.rbegin(); it < last; it++) {
-            *it = pred;
-            assume(X[pred].pred < pred, "wtf");
-            pred = X[pred].pred;
-        }
-
-        return res;
+            return res;
+        } else
+            return {};
     }
 
   protected:
