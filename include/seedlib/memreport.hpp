@@ -8,7 +8,7 @@
 
 #include <gatbl/common.hpp>
 
-#if 1 // def NDEBUG
+#ifdef NDEBUG
 #    define debug_op(op)
 #else
 #    define debug_op(op) op

@@ -128,7 +128,7 @@ query_index_star(const std::vector<std::string>& fq_in, const seedlib::index& in
 
             auto& query_info    = get_read_info(query_id);
             auto  prev_in_edges = query_info.in_edges;
-            std::cout << query_id << "(sz:" << query_length << ", " << query_info << ") -> (";
+            //            std::cout << query_id << "(sz:" << query_length << ", " << query_info << ") -> (";
 
             size_t total_seeds    = 0;
             size_t total_mappings = 0;
@@ -147,21 +147,20 @@ query_index_star(const std::vector<std::string>& fq_in, const seedlib::index& in
                     //                    std::cout << query_id << '\t' << target_id << '\t' << mapping.size() << "c\n";
                 }
 
-                //                continue;
+                std::cout << query_id << '\t' << query_length << '\t' << mapping.target_id() << '\t'
+                          << mapping.target_length() << '\t' << (mapping.is_rev() ? '1' : '0') << '\t' << '-';
 
-                std::cout.put('\t');
-                if (mapping.is_rev()) std::cout.put('-');
-                std::cout << mapping.target_id() << '(' << mapping.target_length() << "): ";
                 for (auto& seed : mapping)
-                    std::cout << seed.query_pos << '/' << seed.target_pos << ' ';
-                std::cout.put('\n');
+                    std::cout << '\t' << seed.query_pos << ',' << seed.target_pos;
+
+                std::cout << '\n';
             }
 
             {
                 auto& query_info = get_read_info(query_id);
                 query_info.add_out_edges(total_seeds, total_mappings);
 
-                std::cout << query_info << ")\n";
+                //                std::cout << query_info << ")\n";
             }
         }
 
