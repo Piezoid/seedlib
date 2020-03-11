@@ -52,11 +52,11 @@ make_int_vector(typename T::size_type size, uint_fast8_t width)
 
 /// Array of contiguous intervals
 /// Provide binary search for interval indice from a value in the interval range
-template<typename LktArrT = int /* BULLSHIT */> struct interval_index
+template<typename LktArrT> struct interval_index
 {
-    using lkt_arr_t = LktArrT;
-    using key_type  = typename lkt_arr_t::size_type;  // Interval indices
-    using idx_type  = typename lkt_arr_t::value_type; // Interval coordinates (positions in the indexed data structure)
+    using lkt_arr_t  = LktArrT;
+    using key_type   = typename lkt_arr_t::size_type;  // Interval indices
+    using value_type = typename lkt_arr_t::value_type; // Interval coordinates (positions in the indexed data structure)
 
     interval_index()                 = default;
     interval_index(interval_index&&) = default;
@@ -85,17 +85,22 @@ template<typename LktArrT = int /* BULLSHIT */> struct interval_index
         return in;
     }
 
-    std::pair<idx_type, idx_type> get_bounds(key_type key) const
+    key_type   domain_size() const noexcept { return _lkt.size(); }
+    value_type image_size() const noexcept { return _lkt.back(); }
+    key_type   max_key() const noexcept { return domain_size() - 1; }
+    value_type max_value() const noexcept { return image_size() - 1; }
+
+    std::pair<value_type, value_type> get_bounds(key_type key) const
     {
-        assert(key < _lkt.size(), "key out of range");
+        assert(key < domain_size(), "key out of range");
         return {key > 0 ? _lkt[key - 1] : 0, _lkt[key]};
     }
 
-    key_type get_key(idx_type idx, key_type low = 0) const
+    key_type get_key(value_type idx, key_type low = 0) const
     {
-        assume(idx < _lkt.back(), "idx out of bound, should be %lu <= size=%lu", idx, _lkt.back());
+        assume(idx < image_size(), "idx out of bound, should be %lu <= size=%lu", idx, image_size());
 
-        key_type high = _lkt.size();
+        key_type high = domain_size();
         while (high - low > 0) {
             key_type midpoint = low + (key_type(high - low) >> 1u);
             if (idx < _lkt[midpoint])
@@ -104,7 +109,7 @@ template<typename LktArrT = int /* BULLSHIT */> struct interval_index
                 low = midpoint + 1;
             }
         }
-        assert(low < _lkt.size(), "idx not found");
+        assume(low < domain_size(), "idx not found");
         return low;
     }
 
@@ -117,17 +122,80 @@ template<typename LktArrT = int /* BULLSHIT */> struct interval_index
     lkt_arr_t _lkt = lkt_arr_t(); // Key to ranges high bound (exclusive)
 };
 
+namespace details {
+
+template<typename base> struct interval_index_statswrapper_base : public base
+{
+    using typename base::key_type;
+    using typename base::value_type;
+
+    using base::base;
+
+    key_type get_key(value_type idx, key_type low = 0) const
+    {
+        const auto& _lkt = this->_lkt;
+        assume(idx < base::image_size(), "idx out of bound, should be %lu <= size=%lu", idx, base::image_size());
+
+        key_type high        = base::domain_size();
+        size_t   dicho_steps = 0;
+        while (high - low > 0) {
+            dicho_steps++;
+            key_type midpoint = low + (key_type(high - low) >> 1u);
+            if (idx < _lkt[midpoint])
+                high = midpoint;
+            else {
+                low = midpoint + 1;
+            }
+        }
+        assume(low < base::domain_size(), "idx not found");
+
+        _nrevqueries++;
+        _dicho_steps += dicho_steps;
+        return low;
+    }
+
+    std::pair<value_type, value_type> get_bounds(key_type key) const
+    {
+        _nqueries++;
+        return base::get_bounds(key);
+    }
+
+    void stat(memreport_t& report, const std::string& prefix = "") const
+    {
+        base::stat(report, prefix);
+        report[prefix + "::keys"] += base::domain_size();
+        report[prefix + "::entries"] += base::image_size();
+        report[prefix + "::queries"] += _nqueries;
+        report[prefix + "::reverse::queries"] += _nrevqueries;
+        report[prefix + "::reverse::dichotomies"] += _dicho_steps;
+    }
+
+    mutable size_t _nqueries    = 0;
+    mutable size_t _nrevqueries = 0;
+    mutable size_t _dicho_steps = 0;
+};
+
+} // namespace details
+
+template<typename base = interval_index<gatbl::int_vector<>>> class interval_index_statswrapper;
+
+template<typename LktArrT>
+struct interval_index_statswrapper<interval_index<LktArrT>>
+  : public details::interval_index_statswrapper_base<interval_index<LktArrT>>
+{
+    using details::interval_index_statswrapper_base<interval_index<LktArrT>>::interval_index_statswrapper_base;
+};
+
 /// Same as interval_index, but accelerates the binary search by storing intervals indices every 2^rev_approx_bits
 /// positions
-template<typename lkt_arr_t      = int /* BULLSHIT for checking that it is never instantiated like that */,
-         uint8_t rev_approx_bits = 5>
+template<typename lkt_arr_t = void, uint8_t rev_approx_bits = 5>
 class reversible_interval_index : public interval_index<lkt_arr_t>
 {
     using base = interval_index<lkt_arr_t>;
 
   public:
-    using typename base::idx_type;
     using typename base::key_type;
+    using typename base::value_type;
 
     reversible_interval_index()                            = default;
     reversible_interval_index(reversible_interval_index&&) = default;
@@ -150,11 +218,11 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         return in;
     }
 
-    key_type get_key(idx_type idx, key_type low = 0) const
+    key_type get_key(value_type idx, key_type low = 0) const
     {
-        assert(idx < this->_lkt.back(), "idx out of bound, should be %lu <= size=%lu", idx, this->_lkt.back());
+        assert(idx < this->image_size(), "idx out of bound, should be %lu <= size=%lu", idx, this->image_size());
 
-        idx_type shifted = idx >> rev_approx_bits;
+        value_type shifted = idx >> rev_approx_bits;
         if (low == 0 && shifted > 0) low = _rev[shifted - 1];
         key_type high = _rev[shifted];
         while (high - low > 0) {
@@ -167,7 +235,7 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         }
 
         assert(low == base::get_key(idx), "low mismatch");
-        assert(low < this->_lkt.size(), "idx not found");
+        assert(low < this->domain_size(), "idx not found");
         return low;
     }
 
@@ -177,17 +245,17 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
         report[prefix + "::reverse"] += size_in_bytes(_rev);
     }
 
-  private:
+  protected:
     void build_rev()
     {
         if (unlikely(this->_lkt.empty())) return;
-        _rev = details::make_int_vector<decltype(_rev)>((this->_lkt.back() >> rev_approx_bits) + 1,
-                                                        gatbl::bits::ilog2(this->_lkt.size()));
+        _rev = details::make_int_vector<decltype(_rev)>((this->image_size() >> rev_approx_bits) + 1,
+                                                        gatbl::bits::ilog2(this->domain_size()));
 
-        auto     it      = this->_lkt.begin();
-        auto     last    = this->_lkt.end();
-        key_type key     = 0;
-        idx_type max_idx = 0;
+        auto       it      = this->_lkt.begin();
+        auto       last    = this->_lkt.end();
+        key_type   key     = 0;
+        value_type max_idx = 0;
         for (auto max_key_in_range : _rev) {
             max_idx += 1u << rev_approx_bits;
             assert(it != last, "Went above max idx twice");
@@ -205,8 +273,53 @@ class reversible_interval_index : public interval_index<lkt_arr_t>
     gatbl::int_vector<> _rev = {}; // Precomputed ranges for binary search
 };
 
+template<typename lkt_arr_t, uint8_t rev_approx_bits>
+class interval_index_statswrapper<reversible_interval_index<lkt_arr_t, rev_approx_bits>>
+  : public details::interval_index_statswrapper_base<reversible_interval_index<lkt_arr_t, rev_approx_bits>>
+{
+    using base = details::interval_index_statswrapper_base<reversible_interval_index<lkt_arr_t, rev_approx_bits>>;
+
+  public:
+    using base::base;
+    using typename base::key_type;
+    using typename base::value_type;
+
+    key_type get_key(value_type idx, key_type low = 0) const
+    {
+        const auto& _rev = this->_rev;
+        assert(idx < base::image_size(), "idx out of bound, should be %lu <= size=%lu", idx, base::image_size());
+
+        value_type shifted = idx >> rev_approx_bits;
+        if (low == 0 && shifted > 0) low = _rev[shifted - 1];
+        key_type high        = _rev[shifted];
+        size_t   dicho_steps = 0;
+        while (high - low > 0) {
+            dicho_steps++;
+            key_type midpoint = low + (key_type(high - low) >> 1u);
+            if (idx < this->_lkt[midpoint])
+                high = midpoint;
+            else {
+                low = midpoint + 1;
+            }
+        }
+
+        assert(low == base::get_key(idx), "low mismatch");
+        assume(low < base::domain_size(), "idx not found");
+
+        base::_nrevqueries++;
+        base::_dicho_steps += dicho_steps;
+        return low;
+    }
+
+    void stat(memreport_t& report, const std::string& prefix = "") const
+    {
+        base::stat(report, prefix);
+        report[prefix + "::reverse::entries"] += base::_rev.size();
+    }
+};
+
 /// A multimap from (almost dense) integer keys to sets of integer values
-template<typename K, typename V, typename vec_t = gatbl::int_vector<>, typename index_t = interval_index<>>
+template<typename K, typename V, typename vec_t = gatbl::int_vector<>, typename index_t = interval_index<vec_t>>
 struct sets_array
 {
     using key_t      = K;
