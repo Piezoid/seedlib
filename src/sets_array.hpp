@@ -392,6 +392,7 @@ struct sets_array
         values.resize(slot_idx);
         _values = std::move(values);
         _index  = std::move(key_to_high_idx);
+        check();
 
 #ifndef NDEBUG
         for (auto& rec : records) {
@@ -429,7 +430,9 @@ struct sets_array
     {
         using gatbl::read;
         read(in, setarr._values);
+
         if (setarr._values.size() != 0) { read(in, setarr._index); }
+        setarr.check();
         return in;
     }
 
@@ -485,6 +488,8 @@ struct sets_array
     }
 
   private:
+    void check() { assume(_values.size() == _index.image_size(), "invalid index size"); }
+
     vec_t   _values{};
     index_t _index{}; /// Intervals in _values for each key
 };
