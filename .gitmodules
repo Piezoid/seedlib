@@ -5,5 +5,5 @@
 [submodule "thirdparty/gatb-lite"]
 	path = thirdparty/gatb-lite
 	url = https://github.com/Piezoid/gatb-lite.git
-	branch = dev-kw
+	branch = master
 	shallow = true
